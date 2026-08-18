@@ -13,6 +13,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from anxietywatch_ml.contracts.normalize import normalize_keys, resolve_identity
+
 
 class SignalQuality(str, Enum):
     GOOD = "good"
@@ -104,8 +106,10 @@ class TelemetryBatchAdapter:
     """
     Adapter to convert backend transport DTO to internal ML schema.
 
-    In practice, the backend DTO comes from MongoDB as a dict.
-    This adapter handles the transformation and validation.
+    In practice, the backend DTO comes from MongoDB as a dict whose keys may
+    be PascalCase (real .NET serialization), camelCase (transport/synthetic)
+    or snake_case (internal). Keys are resolved recursively and the canonical
+    authenticated ``userId`` is enforced (see contracts.normalize).
     """
 
     @staticmethod
@@ -113,38 +117,10 @@ class TelemetryBatchAdapter:
         """
         Convert a backend telemetry batch dict (from MongoDB) to TelemetryBatch.
 
-        Expected keys: batchId, deviceId, userId, sessionId, startedAt, endedAt,
-        sequence, samples (list of sample dicts with timestamp, heartRateBpm,
-        ibiMs, accelerometer, skinTemperatureCelsius, ambientTemperatureCelsius,
-        quality with heartRate, ibi, wearingState)
+        Accepts EventId/eventId/event_id spellings for every field, including
+        nested Samples/Quality. Unknown keys (e.g. ``_id``, ``receivedAt``)
+        are dropped.
         """
-        # Convert field names from camelCase to snake_case
-        converted = {
-            "batch_id": data.get("batchId") or data.get("batch_id"),
-            "device_id": data.get("deviceId") or data.get("device_id"),
-            "user_id": data.get("userId") or data.get("user_id"),
-            "session_id": data.get("sessionId") or data.get("session_id"),
-            "started_at": data.get("startedAt") or data.get("started_at"),
-            "ended_at": data.get("endedAt") or data.get("ended_at"),
-            "sequence": data.get("sequence", 0),
-            "samples": [],
-        }
-
-        for sample in data.get("samples", []):
-            quality = sample.get("quality", {})
-            converted_sample = {
-                "timestamp": sample.get("timestamp"),
-                "heart_rate_bpm": sample.get("heartRateBpm") or sample.get("heart_rate_bpm"),
-                "ibi_ms": sample.get("ibiMs") or sample.get("ibi_ms") or [],
-                "accelerometer": sample.get("accelerometer"),
-                "skin_temperature_celsius": sample.get("skinTemperatureCelsius") or sample.get("skin_temperature_celsius"),
-                "ambient_temperature_celsius": sample.get("ambientTemperatureCelsius") or sample.get("ambient_temperature_celsius"),
-                "quality": {
-                    "heart_rate": quality.get("heartRate") or quality.get("heart_rate", "unknown"),
-                    "ibi": quality.get("ibi", "unknown"),
-                    "wearing_state": quality.get("wearingState") or quality.get("wearing_state", "unknown"),
-                },
-            }
-            converted["samples"].append(converted_sample)
-
-        return TelemetryBatch.model_validate(converted)
+        normalized = normalize_keys(data, TelemetryBatch)
+        normalized["user_id"] = resolve_identity(data)
+        return TelemetryBatch.model_validate(normalized)

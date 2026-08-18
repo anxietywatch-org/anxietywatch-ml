@@ -341,5 +341,57 @@ def smoke(
         raise typer.Exit(1)
 
 
+@app.command()
+def build_dataset(
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Path to config YAML file", exists=True
+    ),
+    output: Path = typer.Option(
+        ..., "--output", "-o", help="Output directory for the dataset"
+    ),
+    events: int = typer.Option(20, "--events", help="Number of synthetic events to generate"),
+):
+    """
+    Build a ground-truth dataset (dataset only, NO training).
+
+    Uses synthetic in-memory documents matching the backend collections
+    (telemetry_batches, suspected_events, event_decisions).
+    """
+    console.print("[bold]AnxietyWatch ML - Ground-Truth Dataset Builder[/bold]")
+    console.print("[yellow][!] DATASET ONLY - NO MODEL TRAINED[/yellow]")
+    console.print("[yellow][!] SYNTHETIC DOCS - PIPELINE VALIDATION ONLY[/yellow]")
+    console.print()
+
+    try:
+        cfg = load_config(str(config) if config else None)
+        from anxietywatch_ml.ground_truth.builder import create_ground_truth_builder
+        from anxietywatch_ml.ground_truth.synthetic import create_ground_truth_generator
+
+        generator = create_ground_truth_generator(cfg)
+        docs = generator.generate_docs(n_events=events)
+        builder = create_ground_truth_builder(cfg)
+        dataset = builder.build(
+            docs["telemetry_batches"],
+            docs["suspected_events"],
+            docs["event_decisions"],
+        )
+
+        dataset.save(str(output))
+        summary = dataset.summary()
+
+        console.print(f"  Rows:            {summary['n_rows']}")
+        console.print(f"  Features:        {summary['n_features']}")
+        console.print(f"  Labels:          {summary['label_counts']}")
+        console.print(f"  Dropped (no telemetry):     {summary['dropped_no_telemetry']}")
+        console.print(f"  Dropped (insufficient):     {summary['dropped_insufficient_data']}")
+        console.print(f"\n[green]Saved to: {output}[/green]")
+        console.print("  - X.csv\n  - y.csv\n  - metadata.csv")
+
+    except Exception as e:
+        console.print(f"[red]Dataset build failed: {e}[/red]")
+        logger.exception("Dataset build error")
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

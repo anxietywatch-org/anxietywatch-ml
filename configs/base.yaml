@@ -99,3 +99,12 @@ synthetic:
   # Label generation
   anomaly_probability: 0.15
   label_noise: 0.05
+
+# Ground-truth dataset building (dataset only, no training)
+ground_truth:
+  window_size_seconds: 60     # ML window: [T-60s, T], T = event.detectedAt
+  min_samples_per_window: 10  # Minimum samples required to form a valid window
+  min_hr_ratio: 0.3           # Minimum fraction of window samples with HR
+  support_requested_probability: 0.3
+  label_noise: 0.05
+  n_events: 20

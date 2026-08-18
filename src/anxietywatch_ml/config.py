@@ -130,6 +130,14 @@ def _get_default_config() -> dict:
             "anomaly_probability": 0.15,
             "label_noise": 0.05,
         },
+        "ground_truth": {
+            "window_size_seconds": 60.0,
+            "min_samples_per_window": 10,
+            "min_hr_ratio": 0.3,
+            "support_requested_probability": 0.3,
+            "label_noise": 0.05,
+            "n_events": 20,
+        },
     }
 
 
