@@ -15,7 +15,7 @@ from anxietywatch_ml.config import load_config
 from anxietywatch_ml.data.validation import ValidationResult, validate_dataframe, log_validation_result
 from anxietywatch_ml.evaluation.metrics import EvaluationResult, evaluate
 from anxietywatch_ml.features.builder import FeatureBuilder, create_feature_builder
-from anxietywatch_ml.models.baseline import BaselineModel
+from anxietywatch_ml.models.baseline import SklearnBaselineModel
 from anxietywatch_ml.preprocessing.pipeline import PreprocessingPipeline, create_pipeline, WindowedData
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class PredictionPipeline:
         # Initialize components
         self.preprocessing = create_pipeline(config)
         self.feature_builder = create_feature_builder(config)
-        self.model = BaselineModel.load(model_path)
+        self.model = SklearnBaselineModel.load(model_path)
 
     def run(
         self,
@@ -196,6 +196,6 @@ def run_prediction(
     # For now, generate synthetic data for demo
     from anxietywatch_ml.data.synthetic import create_generator
     generator = create_generator(config)
-    batches = generator.generate_dataset()
+    batches, _ = generator.generate_dataset()
 
     return pipeline.run(batches)

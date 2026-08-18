@@ -154,7 +154,7 @@ def predict(
             # Use synthetic data for demo
             from anxietywatch_ml.data.synthetic import create_generator
             generator = create_generator(cfg)
-            batches = generator.generate_dataset()
+            batches, _ = generator.generate_dataset()
             result = pipeline.run(batches)
 
         console.print(f"\n[bold]Predictions:[/bold] {len(result.predictions)} windows")

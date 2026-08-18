@@ -44,5 +44,5 @@ Thumbs.db
 *.pkl
 *.joblib
 *.onnx
-models/
-data/
+/models/
+/data/
