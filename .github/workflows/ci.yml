@@ -1,0 +1,77 @@
+name: ML CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+concurrency:
+  group: ml-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality-and-test:
+    name: Quality + Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install project + dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff quality gate (clean subset)
+        run: python -m ruff check src tests --config .ruff-ci.toml
+
+      - name: Package import smoke
+        run: python -m compileall -q src
+
+      - name: Tests
+        run: python -m pytest tests/ -q
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install project + dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: pip-audit (dependency vulnerability scan)
+        run: python -m pip_audit
+        env:
+          PIP_AUDIT_IGNORE_VULN: "PYSEC-2026-1845"
+        continue-on-error: true
