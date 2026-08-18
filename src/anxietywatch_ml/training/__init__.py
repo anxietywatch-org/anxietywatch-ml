@@ -10,6 +10,8 @@ Does NOT deploy to Azure; produces the protocol and the artifact only.
 from anxietywatch_ml.training.protocol import (
     DEFAULT_MIN_ROWS,
     DEFAULT_MIN_USERS,
+    DEFAULT_MODEL_VERSION,
+    DEFAULT_TARGET,
     GROUP_COLUMN,
     DatasetReadinessError,
     DatasetReadinessReport,
@@ -18,12 +20,15 @@ from anxietywatch_ml.training.protocol import (
     assert_dataset_ready,
     check_dataset_ready,
     load_ground_truth_bundle,
+    save_bundle_with_metadata,
     train_ground_truth,
 )
 
 __all__ = [
     "DEFAULT_MIN_ROWS",
     "DEFAULT_MIN_USERS",
+    "DEFAULT_MODEL_VERSION",
+    "DEFAULT_TARGET",
     "GROUP_COLUMN",
     "DatasetReadinessError",
     "DatasetReadinessReport",
@@ -32,5 +37,6 @@ __all__ = [
     "assert_dataset_ready",
     "check_dataset_ready",
     "load_ground_truth_bundle",
+    "save_bundle_with_metadata",
     "train_ground_truth",
 ]

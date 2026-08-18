@@ -56,6 +56,8 @@ from anxietywatch_ml.pipelines.model_pipeline import (
 DEFAULT_MIN_ROWS = 10
 DEFAULT_MIN_USERS = 2
 GROUP_COLUMN = "user_id"
+DEFAULT_MODEL_VERSION = "0.1.0"
+DEFAULT_TARGET = "target_support_requested"
 
 
 class DatasetReadinessError(ValueError):
@@ -209,6 +211,8 @@ def train_ground_truth(
     output_path: Path | str | None = None,
     min_rows: int = DEFAULT_MIN_ROWS,
     min_users: int = DEFAULT_MIN_USERS,
+    model_version: str = DEFAULT_MODEL_VERSION,
+    target: str = DEFAULT_TARGET,
 ) -> GroundTruthTrainingResult:
     """Run the full 004-A protocol on a GroundTruthDataset.
 
@@ -218,8 +222,10 @@ def train_ground_truth(
     each LR variant's decision threshold on val (fallback train), and picks
     the LR "winner" from VALIDATION metrics only. Test metrics never select a
     winner; the selected variant's test evaluation is the final estimate.
-    Optionally persists the selected bundle (with group identifiers stripped)
-    to ``output_path``.
+    Optionally persists the selected bundle (with group identifiers and row
+    indices stripped) to ``output_path``, carrying non-personal inference
+    metadata (``model_version``, ``target``, ``threshold``,
+    ``threshold_source``, ``feature_names``) in ``runtime_config``.
     """
     readiness = assert_dataset_ready(dataset, min_rows=min_rows, min_users=min_users)
 
@@ -305,7 +311,20 @@ def train_ground_truth(
         selected_bundle = (
             balanced_bundle if selected_variant == "balanced" else unweighted_bundle
         )
-        save_trained_bundle(selected_bundle, output_path)
+        selected_threshold = (
+            balanced_threshold if selected_variant == "balanced" else unweighted_threshold
+        )
+        save_bundle_with_metadata(
+            selected_bundle,
+            output_path,
+            {
+                "model_version": model_version,
+                "target": target,
+                "threshold": float(selected_threshold),
+                "threshold_source": selection_source,
+                "feature_names": list(X.columns),
+            },
+        )
 
     return GroundTruthTrainingResult(
         dataset_readiness=readiness,
@@ -335,6 +354,25 @@ def train_ground_truth(
 def load_ground_truth_bundle(path: Path | str) -> TrainedModelBundle:
     """Load a saved ground-truth training artifact."""
     return load_trained_bundle(path)
+
+
+def save_bundle_with_metadata(
+    bundle: TrainedModelBundle,
+    path: Path | str,
+    metadata: dict,
+) -> None:
+    """Persist a bundle whose ``runtime_config`` carries inference metadata.
+
+    ``metadata`` (threshold, model version, target, feature schema) travels in
+    the serialized artifact via ``runtime_config["model"]``. It must never
+    contain user IDs or raw telemetry; ``save_trained_bundle`` still strips
+    split identifiers and row indices before writing.
+    """
+    enriched = deepcopy(bundle)
+    model_meta = dict(enriched.runtime_config.get("model", {}))
+    model_meta.update(metadata)
+    enriched.runtime_config["model"] = model_meta
+    save_trained_bundle(enriched, path)
 
 
 def _split_results(eval_by_split: dict) -> dict[str, EvaluationResult | None]:

@@ -40,6 +40,7 @@ from anxietywatch_ml.training import (
     assert_dataset_ready,
     check_dataset_ready,
     load_ground_truth_bundle,
+    save_bundle_with_metadata,
     train_ground_truth,
 )
 
@@ -454,6 +455,48 @@ class TestArtifactContents:
         assert set(predictions).issubset({0, 1})
         proba = loaded.model.predict_proba(X_transformed)
         assert proba.shape == (len(X_new), 2)
+
+    def test_bundle_metadata_roundtrip_for_inference(self, ds_and_result, tmp_path):
+        """Non-personal inference metadata survives serialization (005-A)."""
+        ds, result = ds_and_result
+        selected_threshold = (
+            result.balanced_threshold
+            if result.selected_variant == "balanced"
+            else result.unweighted_threshold
+        )
+        selected_source = (
+            result.balanced_threshold_source
+            if result.selected_variant == "balanced"
+            else result.unweighted_threshold_source
+        )
+        out = tmp_path / "served_bundle.pkl"
+        bundle = (
+            result.balanced_bundle
+            if result.selected_variant == "balanced"
+            else result.unweighted_bundle
+        )
+        save_bundle_with_metadata(
+            bundle,
+            out,
+            {
+                "model_version": "0.1.0",
+                "target": "target_support_requested",
+                "threshold": float(selected_threshold),
+                "threshold_source": selected_source,
+                "feature_names": list(ds.X.columns),
+            },
+        )
+        loaded = load_ground_truth_bundle(out)
+        model_meta = loaded.runtime_config["model"]
+        assert model_meta["model_version"] == "0.1.0"
+        assert model_meta["target"] == "target_support_requested"
+        assert model_meta["threshold"] == pytest.approx(selected_threshold)
+        assert model_meta["threshold_source"] == selected_source
+        assert model_meta["feature_names"] == list(ds.X.columns)
+        # Metadata transport must not reintroduce identifiers.
+        for name in ("train", "val", "test"):
+            assert len(getattr(loaded.split_result, f"{name}_groups")) == 0
+            assert len(getattr(loaded.split_result, f"{name}_indices")) == 0
 
 
 class TestSyntheticExperiment:
