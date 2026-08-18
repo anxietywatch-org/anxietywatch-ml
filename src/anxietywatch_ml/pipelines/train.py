@@ -1,9 +1,11 @@
 """
 Training pipeline for AnxietyWatch ML.
 
-Orchestrates the full training flow:
-synthetic data -> preprocessing -> features -> model training -> evaluation
+The bootstrap trains only on synthetic data.  It produces a complete
+TrainedModelBundle containing TRAIN-fitted preprocessing plus the estimator.
 """
+
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
@@ -11,25 +13,30 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
-import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 from anxietywatch_ml.config import load_config
-from anxietywatch_ml.data.synthetic import SyntheticTelemetryGenerator, create_generator
-from anxietywatch_ml.data.validation import validate_batch, log_validation_result
-from anxietywatch_ml.evaluation.metrics import EvaluationConfig, EvaluationResult, evaluate, create_evaluator
-from anxietywatch_ml.features.builder import FeatureBuilder, create_feature_builder
-from anxietywatch_ml.models.baseline import BaselineModel, create_model
-from anxietywatch_ml.preprocessing.pipeline import PreprocessingPipeline, create_pipeline, WindowedData
+from anxietywatch_ml.data.validation import log_validation_result, validate_batch
+from anxietywatch_ml.evaluation.metrics import EvaluationResult
+from anxietywatch_ml.features.builder import create_feature_builder
+from anxietywatch_ml.pipelines.model_pipeline import (
+    ModelPipelineConfig,
+    TrainedModelBundle,
+    evaluate_pipeline,
+    save_trained_bundle,
+    train_with_pipeline,
+)
+from anxietywatch_ml.preprocessing.pipeline import WindowedData, create_pipeline
+from anxietywatch_ml.data.synthetic import create_generator
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class TrainingResult:
-    """Result of training pipeline."""
-    model: BaselineModel
+    """Result of the reproducible training pipeline."""
+
+    bundle: TrainedModelBundle
     train_metrics: EvaluationResult
     val_metrics: Optional[EvaluationResult]
     test_metrics: EvaluationResult
@@ -38,124 +45,109 @@ class TrainingResult:
     n_val: int
     n_test: int
 
+    @property
+    def model(self):
+        """Compatibility accessor for callers that still need the estimator."""
+        return self.bundle.model
+
 
 class TrainingPipeline:
-    """
-    Full training pipeline for AnxietyWatch ML.
-
-    This pipeline uses SYNTHETIC DATA ONLY.
-    It does NOT train a clinical anxiety detector.
-    """
+    """Single source of truth for AnxietyWatch ML bootstrap training."""
 
     def __init__(self, config: dict):
         self.config = config
         self.random_seed = config.get("random_seed", 42)
-
-        # Initialize components
         self.generator = create_generator(config)
         self.preprocessing = create_pipeline(config)
         self.feature_builder = create_feature_builder(config)
-        self.model = create_model(config)
-        self.evaluator_config = create_evaluator(config)
-
-        # Training splits
-        train_cfg = config.get("training", {})
-        self.test_size = train_cfg.get("test_size", 0.2)
-        self.val_size = train_cfg.get("val_size", 0.1)
-        self.stratify = train_cfg.get("stratify", True)
 
     def run(self, model_output_path: Optional[Path] = None) -> TrainingResult:
-        """Run the complete training pipeline."""
         logger.info("=" * 60)
         logger.info("Starting AnxietyWatch ML Training Pipeline")
         logger.info("DATA: SYNTHETIC - NOT CLINICAL")
         logger.info("=" * 60)
 
-        # 1. Generate synthetic data
         logger.info("Step 1/6: Generating synthetic telemetry data...")
         batches, anomaly_sessions = self.generator.generate_dataset()
-        logger.info(f"Generated {len(batches)} batches, {sum(anomaly_sessions.values())} anomaly sessions")
+        logger.info(
+            "Generated %d batches, %d anomaly sessions",
+            len(batches),
+            sum(anomaly_sessions.values()),
+        )
 
-        # Validate a sample of batches
         for batch in batches[:5]:
-            result = validate_batch(batch)
-            log_validation_result(result, "Batch validation")
+            validation = validate_batch(batch)
+            log_validation_result(validation, "Batch validation")
 
-        # 2. Preprocessing
         logger.info("Step 2/6: Preprocessing and windowing...")
         windowed_data = self.preprocessing.run(batches)
 
-        # 3. Feature engineering
         logger.info("Step 3/6: Building features...")
         X = self.feature_builder.build(windowed_data.windows)
 
-        # 4. Create labels (synthetic - based on anomaly sessions)
         logger.info("Step 4/6: Creating synthetic labels...")
         y = self._create_labels(windowed_data, anomaly_sessions)
 
-        # 5. Train/val/test split
-        logger.info("Step 5/6: Splitting data...")
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size=self.test_size,
-            random_state=self.random_seed,
-            stratify=y if self.stratify else None,
+        logger.info("Step 5/6: Group-aware split and TRAIN-only preprocessing...")
+        training_cfg = self.config.get("training", {})
+        group_by = training_cfg.get("group_by", "session")
+        group_key = "session_id" if group_by == "session" else "user_id"
+
+        groups = pd.Series(
+            [meta[group_key] for meta in windowed_data.window_metadata],
+            index=X.index,
+            name=group_key,
         )
 
-        if self.val_size > 0:
-            val_relative_size = self.val_size / (1 - self.test_size)
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_train, y_train,
-                test_size=val_relative_size,
-                random_state=self.random_seed,
-                stratify=y_train if self.stratify else None,
-            )
-        else:
-            X_val, y_val = None, None
+        pipeline_config = ModelPipelineConfig(
+            model_type=self.config.get("model", {}).get("type", "baseline"),
+            group_by=group_by,
+            test_size=training_cfg.get("test_size", 0.2),
+            val_size=training_cfg.get("val_size", 0.1),
+            random_state=training_cfg.get(
+                "random_state",
+                self.random_seed,
+            ),
+        )
 
-        logger.info(f"Split sizes - Train: {len(X_train)}, Val: {len(X_val) if X_val is not None else 0}, Test: {len(X_test)}")
+        bundle = train_with_pipeline(
+            X=X,
+            y=y,
+            group_column=groups,
+            config=pipeline_config,
+            runtime_config=self.config,
+        )
 
-        # 6. Train model
-        logger.info("Step 6/6: Training model...")
-        self.model.fit(X_train, y_train)
+        logger.info("Step 6/6: Evaluating train/val/test...")
+        evaluation = evaluate_pipeline(bundle, X, y)
 
-        # 7. Evaluate
-        logger.info("Evaluating on train set...")
-        train_proba = self.model.predict_proba(X_train)
-        train_pred = self.model.predict(X_train)
-        train_metrics = evaluate(y_train, train_pred, train_proba, self.evaluator_config)
+        train_metrics = evaluation["train"]["result"]
+        val_metrics = (
+            evaluation["val"]["result"]
+            if evaluation["val"] is not None
+            else None
+        )
+        test_metrics = evaluation["test"]["result"]
 
-        val_metrics = None
-        if X_val is not None:
-            logger.info("Evaluating on validation set...")
-            val_proba = self.model.predict_proba(X_val)
-            val_pred = self.model.predict(X_val)
-            val_metrics = evaluate(y_val, val_pred, val_proba, self.evaluator_config)
+        logger.info("\n%s", train_metrics)
+        if val_metrics is not None:
+            logger.info("\n%s", val_metrics)
+        logger.info("\n%s", test_metrics)
 
-        logger.info("Evaluating on test set...")
-        test_proba = self.model.predict_proba(X_test)
-        test_pred = self.model.predict(X_test)
-        test_metrics = evaluate(y_test, test_pred, test_proba, self.evaluator_config)
+        if model_output_path is not None:
+            save_trained_bundle(bundle, model_output_path)
+            logger.info("Training bundle saved to %s", model_output_path)
 
-        # Log results
-        logger.info("\n" + str(train_metrics))
-        if val_metrics:
-            logger.info("\n" + str(val_metrics))
-        logger.info("\n" + str(test_metrics))
-
-        # Save model if path provided
-        if model_output_path:
-            self.model.save(model_output_path)
-
+        split = bundle.split_result
         return TrainingResult(
-            model=self.model,
+            bundle=bundle,
             train_metrics=train_metrics,
             val_metrics=val_metrics,
             test_metrics=test_metrics,
             feature_names=list(X.columns),
-            n_train=len(X_train),
-            n_val=len(X_val) if X_val is not None else 0,
-            n_test=len(X_test),
+            n_train=len(split.train_indices),
+            n_val=len(split.val_indices),
+            n_test=len(split.test_indices),
         )
 
     def _create_labels(
@@ -163,38 +155,34 @@ class TrainingPipeline:
         windowed_data: WindowedData,
         anomaly_sessions: Optional[dict[UUID, bool]] = None,
     ) -> pd.Series:
-        """
-        Create synthetic labels for training.
+        """Map synthetic session ground truth to windows without heuristic fallback."""
 
-        Uses the anomaly session flags from the synthetic generator.
-        If anomaly_sessions is not provided, falls back to HR-based heuristic.
-        """
-        labels = []
+        if anomaly_sessions is None:
+            raise ValueError(
+                "Synthetic training requires anomaly_sessions ground truth."
+            )
 
-        for i, (window, meta) in enumerate(zip(windowed_data.windows, windowed_data.window_metadata)):
-            session_id_str = meta.get("session_id")
-            # Convert string session_id to UUID for lookup in anomaly_sessions
-            session_id_uuid = UUID(session_id_str) if session_id_str else None
-            
-            if anomaly_sessions is not None and session_id_uuid in anomaly_sessions:
-                # Use the ground truth anomaly flag from synthetic generator
-                label = 1 if anomaly_sessions[session_id_uuid] else 0
-            else:
-                # Fallback: HR-based heuristic (for backward compatibility)
-                hr = window["heart_rate_bpm"].dropna()
-                if len(hr) > 0:
-                    mean_hr = hr.mean()
-                    label = 1 if mean_hr > 100 else 0
-                else:
-                    label = 0
-            labels.append(label)
+        labels: list[int] = []
+        for meta in windowed_data.window_metadata:
+            session_id = meta.get("session_id")
+            if not session_id:
+                raise ValueError("Window metadata is missing session_id")
 
-        return pd.Series(labels, name="label")
+            session_uuid = UUID(str(session_id))
+            if session_uuid not in anomaly_sessions:
+                raise ValueError(
+                    f"No synthetic ground truth found for session {session_id}"
+                )
+
+            labels.append(1 if anomaly_sessions[session_uuid] else 0)
+
+        return pd.Series(labels, index=range(len(labels)), name="label")
 
 
-def run_training(config_path: Optional[str] = None, model_output: Optional[str] = None) -> TrainingResult:
-    """Entry point for running training pipeline."""
+def run_training(
+    config_path: Optional[str] = None,
+    model_output: Optional[str] = None,
+) -> TrainingResult:
     config = load_config(config_path)
-    pipeline = TrainingPipeline(config)
     output_path = Path(model_output) if model_output else None
-    return pipeline.run(output_path)
+    return TrainingPipeline(config).run(output_path)

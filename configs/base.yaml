@@ -50,7 +50,7 @@ features:
 
 # Model configuration
 model:
-  type: "baseline"  # baseline | logistic_regression | dummy
+  type: "logistic_regression"  # baseline | logistic_regression | dummy
   # LogisticRegression specific (used when type=logistic_regression)
   logistic_regression:
     C: 1.0

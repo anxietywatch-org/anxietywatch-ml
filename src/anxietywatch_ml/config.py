@@ -72,8 +72,8 @@ def _get_default_config() -> dict:
             "hrv_rmssd": True,
             "hrv_sdnn": True,
             "hrv_pnn50": False,
-            "movement_magnitude_mean": True,
-            "movement_variance_mean": True,
+            "movement_magnitude_mean": False,
+            "movement_variance_mean": False,
             "skin_temp_mean": True,
             "skin_temp_std": False,
             "quality_good_ratio": True,
@@ -82,10 +82,10 @@ def _get_default_config() -> dict:
             "valid_sample_ratio": True,
             "window_duration_seconds": True,
             "sample_count": True,
-            "last_sample_age_seconds": True,
+            "last_sample_age_seconds": False,
         },
         "model": {
-            "type": "baseline",
+            "type": "logistic_regression",
             "logistic_regression": {
                 "C": 1.0,
                 "max_iter": 200,
@@ -100,7 +100,7 @@ def _get_default_config() -> dict:
         "training": {
             "test_size": 0.2,
             "val_size": 0.1,
-            "stratify": True,
+            "group_by": "session",
             "random_state": 42,
         },
         "evaluation": {

@@ -1,123 +1,131 @@
 """
-Model serialization utilities for AnxietyWatch ML.
+Serialization utilities for AnxietyWatch ML artifacts.
 
-This module isolates pickle-based serialization behind a clean interface.
-WARNING: Never load pickle files from untrusted sources.
-Pickle can execute arbitrary code during deserialization.
+WARNING: pickle can execute arbitrary code while loading.
+Only load artifacts produced by this project from trusted storage.
 """
+
+from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, TypeVar
 
-# Use Protocol with duck typing to avoid circular imports
-class BaselineModelProtocol(Protocol):
-    """Protocol for baseline models - avoids circular import."""
-    _is_fitted: bool
-    pipeline: Any
-    _feature_names: list[str]
-    config: Any
+T = TypeVar("T")
 
 
-class ModelSerializer(Protocol):
-    """Protocol for model serialization."""
+class PickleArtifactSerializer:
+    """Small versioned serializer for trusted AnxietyWatch ML artifacts."""
 
-    def save(self, model: BaselineModelProtocol, path: Path) -> None:
-        """Save model to path."""
-        ...
+    FORMAT_VERSION = 2
 
-    def load(self, path: Path, model_type: type) -> BaselineModelProtocol:
-        """Load model from path."""
-        ...
+    def save(
+        self,
+        artifact: Any,
+        path: Path | str,
+        *,
+        artifact_type: str,
+    ) -> None:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-
-class PickleModelSerializer:
-    """
-    Pickle-based model serializer.
-
-    SECURITY WARNING: Never load pickle files from untrusted sources.
-    Pickle can execute arbitrary code during deserialization.
-    Only use with models saved by this application.
-    """
-
-    def save(self, model: BaselineModelProtocol, path: Path) -> None:
-        """Save model to path using pickle."""
-        if not model._is_fitted:
-            raise RuntimeError("Cannot save unfitted model")
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Save with metadata for validation
-        data = {
-            "model": model,
-            "format_version": 1,
+        payload = {
+            "artifact": artifact,
+            "artifact_type": artifact_type,
+            "format_version": self.FORMAT_VERSION,
             "serialized_by": "anxietywatch-ml",
         }
 
-        with open(path, "wb") as f:
-            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        with output_path.open("wb") as handle:
+            pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    def load(self, path: Path, model_type: type) -> BaselineModelProtocol:
-        """Load model from path using pickle."""
-        with open(path, "rb") as f:
-            data = pickle.load(f)
+    def load(
+        self,
+        path: Path | str,
+        *,
+        expected_type: type[T],
+        expected_artifact_type: str,
+    ) -> T:
+        input_path = Path(path)
 
-        # Validate format
-        if not isinstance(data, dict):
-            raise ValueError("Invalid model format: expected dict")
+        with input_path.open("rb") as handle:
+            payload = pickle.load(handle)
 
-        if "model" not in data:
-            raise ValueError("Invalid model format: missing 'model' key")
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid artifact format: expected a metadata dictionary")
 
-        model = data["model"]
+        if payload.get("serialized_by") != "anxietywatch-ml":
+            raise ValueError("Invalid artifact format: unexpected serializer")
 
-        if not isinstance(model, model_type):
+        if payload.get("format_version") != self.FORMAT_VERSION:
             raise ValueError(
-                f"Loaded model type {type(model)} does not match expected {model_type}"
+                "Unsupported artifact format version: "
+                f"{payload.get('format_version')!r}"
             )
 
-        if not model._is_fitted:
-            raise RuntimeError("Loaded model is not fitted")
+        if payload.get("artifact_type") != expected_artifact_type:
+            raise ValueError(
+                "Unexpected artifact type: "
+                f"{payload.get('artifact_type')!r}; "
+                f"expected {expected_artifact_type!r}"
+            )
 
-        return model
+        artifact = payload.get("artifact")
+        if not isinstance(artifact, expected_type):
+            raise ValueError(
+                f"Loaded artifact has type {type(artifact)!r}; "
+                f"expected {expected_type!r}"
+            )
 
-
-# Default serializer instance
-default_serializer = PickleModelSerializer()
-
-
-def save_model(model: BaselineModelProtocol, path: Path | str) -> None:
-    """
-    Save a fitted model to disk.
-
-    Args:
-        model: Fitted BaselineModel instance
-        path: Output path (will be created if needed)
-
-    Raises:
-        RuntimeError: If model is not fitted
-        OSError: If path cannot be written
-    """
-    default_serializer.save(model, Path(path))
+        return artifact
 
 
-def load_model(path: Path | str, model_type: type) -> BaselineModelProtocol:
-    """
-    Load a fitted model from disk.
+def save_artifact(
+    artifact: Any,
+    path: Path | str,
+    *,
+    artifact_type: str,
+) -> None:
+    PickleArtifactSerializer().save(
+        artifact,
+        path,
+        artifact_type=artifact_type,
+    )
 
-    SECURITY WARNING: Only load models saved by this application.
-    Never load pickle files from untrusted sources.
 
-    Args:
-        path: Path to model file
-        model_type: Expected model type
+def load_artifact(
+    path: Path | str,
+    *,
+    expected_type: type[T],
+    expected_artifact_type: str,
+) -> T:
+    return PickleArtifactSerializer().load(
+        path,
+        expected_type=expected_type,
+        expected_artifact_type=expected_artifact_type,
+    )
 
-    Returns:
-        Fitted model instance
 
-    Raises:
-        ValueError: If model format is invalid or type mismatch
-        RuntimeError: If loaded model is not fitted
-        OSError: If file cannot be read
-    """
-    return default_serializer.load(Path(path), model_type)
+# Backwards-compatible helpers for standalone baseline-model tests.
+def save_model(model: Any, path: Path | str) -> None:
+    if not getattr(model, "_is_fitted", False):
+        raise RuntimeError("Cannot save unfitted model")
+
+    save_artifact(
+        model,
+        path,
+        artifact_type="baseline_model",
+    )
+
+
+def load_model(path: Path | str, model_type: type[T]) -> T:
+    model = load_artifact(
+        path,
+        expected_type=model_type,
+        expected_artifact_type="baseline_model",
+    )
+
+    if not getattr(model, "_is_fitted", False):
+        raise RuntimeError("Loaded model is not fitted")
+
+    return model
