@@ -35,6 +35,16 @@ target used for training is derived from that response:
   least confounded by everyday physical activity, and maps to the product
   action (breathing intervention / escalation).
 
+### Target semantics
+
+- `target_support_requested` is a **derived 0/1 training view**; it never
+  replaces the original `response` stored in MongoDB.
+- The model estimates `P(SUPPORT_REQUESTED | WATCH_DETECTOR_TRIGGERED)`, not
+  `P(ANXIETY | TELEMETRY)` and not `P(USER_OK)`.
+- Class balance is dataset-dependent (driven by the detector and
+  `ground_truth.label_noise`). The QA report surfaces the observed balance;
+  training must not assume it is fixed.
+
 ## 2. Selection Bias (Explicit)
 
 A decision only exists **for events that triggered the watch heuristic
@@ -47,6 +57,12 @@ detector** (state reached `USER_VALIDATION`). Therefore:
 - Distribution shifts in the heuristic rules (`rules_version`) change which
   events enter the dataset. This is auditable because `rules_version` is kept
   as metadata (excluded from features).
+
+A second, more subtle bias: the ML features are recomputed from raw telemetry,
+so any signal the cloud does not transport is invisible to the model even if
+the Watch computed it on-device (see Feature Parity). This is a deliberate
+information boundary, not a leak, but it means the model can never recover
+e.g. movement-derived features.
 
 This bias is a **feature of the product** (the prompt is only shown after a
 trigger) and must be documented in any downstream evaluation.
@@ -113,10 +129,78 @@ in `metadata` for audit and parity checks:
 | `watch_baseline_snapshot` | `suspected.baseline` | watch-computed baseline; parity only |
 
 The model must produce its own features from raw telemetry. The watch snapshot
-is used only by `GroundTruthDatasetBuilder.parity_check()` to quantify how the
-ML-computed features differ from the on-watch computation.
+is used only by `GroundTruthDatasetBuilder.parity_check()` and by the richer
+audit in `src/anxietywatch_ml/qa/parity.py` to quantify how the ML-computed
+features differ from the on-watch computation.
 
-## 7. Output Artifacts
+## 7. Feature Parity
+
+Two independent computations run over the same physiological window
+`[T - 60s, T]`:
+
+| Watch (Kotlin `DerivedFeatures`) | ML (Python `FeatureBuilder`) |
+|---|---|
+| `heartRateMean` | `hr_mean` |
+| `heartRateMax` | `hr_max` |
+| `heartRateSlopeBpmPerMinute` | `hr_slope_bpm_per_min` |
+| `rmssdMillis` | `hrv_rmssd` |
+| `sdnnMillis` | `hrv_sdnn` |
+| `validSampleRatio` | `valid_sample_ratio` |
+| `sampleCount` | `sample_count` |
+
+`compute_feature_parity` (`src/anxietywatch_ml/qa/parity.py`) recomputes the ML
+features from raw telemetry and measures the per-event difference
+(`watch_value - ml_value`) plus per-field match/divergence statistics. It does
+**not** force the two computations to agree; it reports where they do and where
+they do not.
+
+### Why Watch and Python can differ
+
+- **Different preprocessing**: the Watch computes features on-device over its
+  own live buffer; ML runs the shared `PreprocessingPipeline` (missing-value
+  handling, outlier detection) on the windowed telemetry.
+- **Different missingness handling**: the Watch decides validity at sampling
+  time; ML decides from what the cloud received (e.g. `valid_sample_ratio`
+  diverges when samples lack HR or carry `poor` quality).
+- **Irregular sampling**: timestamps are uneven; each side buckets samples
+  slightly differently.
+- **IBI filtering**: ML keeps IBIs in `[250, 2000]` ms and requires >= 3 IBIs
+  before computing `hrv_rmssd`/`hrv_sdnn`; the Watch applies its own filters.
+  The synthetic generator stores `rmssdMillis`/`sdnnMillis` as `None`, so
+  synthetic parity shows those fields as one-side missing.
+- **Sensor availability**: the cloud does not receive accelerometer data, so
+  `movementMagnitudeMean`/`movementVariance` are **not comparable** (see
+  below).
+- **Mathematical definition**: Watch `sampleCount` counts HR-present samples
+  while ML `sample_count` counts all window samples; ML slope uses linear
+  regression over minutes since window start.
+- **Window differences (if any)**: the Watch snapshot is computed at detection
+  time on the on-device buffer; the ML window is `[T - 60s, T]` over ingested
+  batches. Any discrepancy surfaces in the parity report.
+
+### Derived check
+
+`heartRateDeltaFromBaseline` (Watch) is compared with the ML recomputation
+`hr_mean - baseline.mean_heart_rate` using `watch_baseline_snapshot`. The
+baseline snapshot may not be exactly the baseline the Watch used for its own
+delta; that difference is itself part of the parity measurement.
+
+### Fields never compared
+
+- `movementMagnitudeMean`, `movementVariance`: the cloud does not transport
+  the accelerometer data needed to recompute them in Python. They are listed
+  as `NOT_COMPARABLE` with the documented reason rather than being faked as
+  comparable.
+- `lastSampleAgeSeconds` (Watch-only) and the ML-only features (`hr_std`,
+  `hr_min`, `ibi_available`, `ibi_coverage_ratio`, `skin_temp_mean`, the
+  quality ratios, `window_duration_seconds`) have no counterpart on the other
+  side and are not compared.
+
+Divergences are surfaced, not hidden. They inform whether
+`watch_features_snapshot` can ever become model input — which today it cannot,
+because it is detector-triggered metadata.
+
+## 8. Output Artifacts
 
 - `X.csv` — feature matrix (one row per decision, one column per feature).
 - `y.csv` — derived `target_support_requested`.
@@ -124,7 +208,7 @@ ML-computed features differ from the on-watch computation.
   `response_category`, `target_support_requested`, and the excluded
   detector columns.
 
-## 8. Usage
+## 9. Usage
 
 ```python
 from anxietywatch_ml.config import load_config
@@ -143,7 +227,27 @@ dataset.save("data/ground_truth")
 anxietywatch-ml build-dataset --output data/ground_truth --events 20
 ```
 
-## 9. Explicit Limitations
+## 10. Dataset QA
+
+`compute_dataset_qa` (`src/anxietywatch_ml/qa/dataset_qa.py`) produces a
+quality report over the built dataset **before any training**. It covers:
+
+- class balance and number of classes
+- unique users / sessions / devices
+- original responses and response categories
+- per-feature missingness (`missing_ratio`, flagged above a threshold)
+- IBI coverage (`ibi_available`, `ibi_coverage_ratio`, rows with no IBI)
+- samples per window (`sample_count` distribution)
+- excluded events grouped by `reason` (from `dataset.exclusions`)
+- feature distributions (`describe()`)
+- temporal coverage of `detected_at`
+
+Structural problems are surfaced as warnings instead of failing silently:
+single class in `y`, IBI entirely missing (HRV features NaN), empty dataset,
+high feature missingness, and small datasets. The report is order-independent:
+shuffling the input rows does not change any result.
+
+## 11. Explicit Limitations
 
 - Synthetic docs validate plumbing only; they are not representative of real
   user behavior.
