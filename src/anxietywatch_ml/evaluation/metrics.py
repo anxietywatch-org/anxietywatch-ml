@@ -38,6 +38,9 @@ class EvaluationConfig:
                 "f1",
                 "roc_auc",
                 "average_precision",
+                "balanced_accuracy",
+                "specificity",
+                "false_positive_rate",
             ]
 
 
@@ -111,22 +114,48 @@ def evaluate(
     has_both_classes = n_positive > 0 and n_negative > 0
     has_proba = y_proba is not None and len(y_proba.shape) == 2 and y_proba.shape[1] == 2
 
-    # Basic metrics (always computable)
+    # Confusion matrix (single-class y_true is forced to 2x2)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    if cm.shape != (2, 2):
+        # Handle case where only one class present
+        cm = np.array([[cm[0,0] if cm.shape[0] > 0 else 0, 0], [0, 0]])
+    tn, fp, fn, tp = cm.ravel()
+
+    # Availability rules: a metric is unavailable (NaN + metrics_available=False)
+    # when its denominator does not exist for the split, so no artificial 0.0
+    # or balanced_accuracy over a half-missing evaluation is ever produced.
+    has_pred_pos = (tp + fp) > 0   # precision defined
+    has_true_pos = (tp + fn) > 0   # recall defined
+    has_true_neg = (tn + fp) > 0   # specificity / FPR defined
+
+    # Basic metrics
     if "accuracy" in config.metrics:
         metrics["accuracy"] = accuracy_score(y_true, y_pred)
         metrics_available["accuracy"] = True
 
     if "precision" in config.metrics:
-        metrics["precision"] = precision_score(y_true, y_pred, zero_division=0)
-        metrics_available["precision"] = True
+        if has_pred_pos:
+            metrics["precision"] = precision_score(y_true, y_pred, zero_division=0)
+            metrics_available["precision"] = True
+        else:
+            metrics["precision"] = float("nan")
+            metrics_available["precision"] = False
 
     if "recall" in config.metrics:
-        metrics["recall"] = recall_score(y_true, y_pred, zero_division=0)
-        metrics_available["recall"] = True
+        if has_true_pos:
+            metrics["recall"] = recall_score(y_true, y_pred, zero_division=0)
+            metrics_available["recall"] = True
+        else:
+            metrics["recall"] = float("nan")
+            metrics_available["recall"] = False
 
     if "f1" in config.metrics:
-        metrics["f1"] = f1_score(y_true, y_pred, zero_division=0)
-        metrics_available["f1"] = True
+        if has_pred_pos and has_true_pos:
+            metrics["f1"] = f1_score(y_true, y_pred, zero_division=0)
+            metrics_available["f1"] = True
+        else:
+            metrics["f1"] = float("nan")
+            metrics_available["f1"] = False
 
     # Probability-based metrics (require both classes in y_true)
     if "roc_auc" in config.metrics:
@@ -155,11 +184,33 @@ def evaluate(
             metrics["average_precision"] = None
             metrics_available["average_precision"] = False
 
-    # Confusion matrix
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    if cm.shape != (2, 2):
-        # Handle case where only one class present
-        cm = np.array([[cm[0,0] if cm.shape[0] > 0 else 0, 0], [0, 0]])
+    # Confusion-matrix derived metrics
+    tpr = tp / (tp + fn) if has_true_pos else float("nan")
+    tnr = tn / (tn + fp) if has_true_neg else float("nan")
+
+    if "balanced_accuracy" in config.metrics:
+        if has_true_pos and has_true_neg:
+            metrics["balanced_accuracy"] = (tpr + tnr) / 2.0
+            metrics_available["balanced_accuracy"] = True
+        else:
+            metrics["balanced_accuracy"] = float("nan")
+            metrics_available["balanced_accuracy"] = False
+
+    if "specificity" in config.metrics:
+        if has_true_neg:
+            metrics["specificity"] = tnr
+            metrics_available["specificity"] = True
+        else:
+            metrics["specificity"] = float("nan")
+            metrics_available["specificity"] = False
+
+    if "false_positive_rate" in config.metrics:
+        if has_true_neg:
+            metrics["false_positive_rate"] = 1.0 - tnr
+            metrics_available["false_positive_rate"] = True
+        else:
+            metrics["false_positive_rate"] = float("nan")
+            metrics_available["false_positive_rate"] = False
 
     logger.info(f"Evaluation: {metrics} (available: {metrics_available})")
     return EvaluationResult(

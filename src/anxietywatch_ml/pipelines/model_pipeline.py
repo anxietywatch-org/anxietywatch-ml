@@ -281,12 +281,34 @@ def evaluate_pipeline(
     return results
 
 
+def sanitize_split_result(split: SplitResult) -> SplitResult:
+    """Copy of ``split_result`` with identifiers AND row indices removed.
+
+    The serialized artifact is a model bundle, never a data export: neither the
+    user/session/device/event identifiers nor the positions of the original
+    train/val/test rows belong in the pickled file shipped to inference. The
+    complete diagnostic split (indices + groups) stays in the in-memory
+    ``GroundTruthTrainingResult`` during training and reporting.
+    """
+    return SplitResult(
+        train_indices=np.array([], dtype=int),
+        val_indices=np.array([], dtype=int),
+        test_indices=np.array([], dtype=int),
+        train_groups=np.array([], dtype=object),
+        val_groups=np.array([], dtype=object),
+        test_groups=np.array([], dtype=object),
+        group_by=split.group_by,
+    )
+
+
 def save_trained_bundle(
     bundle: TrainedModelBundle,
     path: Path | str,
 ) -> None:
+    sanitized = deepcopy(bundle)
+    sanitized.split_result = sanitize_split_result(sanitized.split_result)
     save_artifact(
-        bundle,
+        sanitized,
         path,
         artifact_type=BUNDLE_ARTIFACT_TYPE,
     )
