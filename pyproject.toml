@@ -1,0 +1,64 @@
+[project]
+name = "anxietywatch-ml"
+version = "0.1.0"
+description = "Machine Learning component for AnxietyWatch — MVP bootstrap / data pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "AnxietyWatch Team", email = "team@anxietywatch.example"}
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2,<3",
+    "scikit-learn>=1.5,<2",
+    "pydantic>=2.8,<3",
+    "pyyaml>=6.0,<7",
+    "python-dotenv>=1.0,<2",
+    "typer>=0.12,<1",
+    "rich>=13.0,<14",
+]
+
+[project.scripts]
+anxietywatch-ml = "anxietywatch_ml.cli:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-cov>=5.0,<6",
+    "ruff>=0.5,<1",
+]
+
+[build-system]
+requires = ["setuptools>=68,<70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["anxietywatch_ml*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = ["E", "F", "I", "UP", "B", "C4", "PTH", "PL", "SIM", "T20"]
+ignore = ["S101", "S311", "B008"]
+fixable = ["E", "F", "I", "UP", "B", "C4", "PTH", "PL", "SIM", "T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true

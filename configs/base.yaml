@@ -1,0 +1,101 @@
+# AnxietyWatch ML - Base Configuration
+# All configurable parameters for the ML pipeline
+
+# Reproducibility
+random_seed: 42
+
+# Windowing configuration for time-series segmentation
+window:
+  size_seconds: 60      # Window length in seconds
+  stride_seconds: 30    # Stride between windows in seconds
+  min_samples_per_window: 10  # Minimum samples required to form a valid window
+
+# Feature engineering configuration
+features:
+  # Heart rate features
+  hr_mean: true
+  hr_std: true
+  hr_min: true
+  hr_max: true
+  hr_slope_bpm_per_min: true
+  hr_delta_from_baseline: false  # Requires baseline - not available yet
+
+  # HRV features (require IBI data)
+  hrv_rmssd: true
+  hrv_sdnn: true
+  hrv_pnn50: false
+
+  # IBI availability features
+  ibi_available: true
+  ibi_coverage_ratio: true
+
+  # Movement features (from accelerometer magnitude/variance)
+  movement_magnitude_mean: false
+  movement_variance_mean: false
+
+  # Temperature features
+  skin_temp_mean: true
+  skin_temp_std: false
+
+  # Quality features
+  quality_good_ratio: true
+  quality_fair_ratio: true
+  quality_poor_ratio: true
+  valid_sample_ratio: true
+
+  # Temporal features
+  window_duration_seconds: true
+  sample_count: true
+  last_sample_age_seconds: false
+
+# Model configuration
+model:
+  type: "baseline"  # baseline | logistic_regression | dummy
+  # LogisticRegression specific (used when type=logistic_regression)
+  logistic_regression:
+    C: 1.0
+    max_iter: 200
+    class_weight: "balanced"
+    random_state: 42
+  # DummyClassifier specific (used when type=dummy)
+  dummy:
+    strategy: "prior"  # prior | stratified | uniform | constant
+    constant: 0
+
+# Training configuration
+training:
+  test_size: 0.2
+  val_size: 0.1
+  group_by: "session"
+  random_state: 42
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "roc_auc"
+    - "average_precision"
+  # Threshold for binary classification
+  threshold: 0.5
+
+# Synthetic data generation
+synthetic:
+  n_users: 10
+  n_sessions_per_user: 5
+  samples_per_session: 300
+  sampling_rate_hz: 1.0  # Approximate samples per second
+  # Signal characteristics
+  hr_baseline_mean: 70.0
+  hr_baseline_std: 8.0
+  hr_anomaly_shift_bpm: 20.0
+  ibi_available_probability: 0.3  # Only ~30% of devices (Samsung) provide IBI
+  motion_magnitude_mean: 0.05
+  motion_magnitude_std: 0.03
+  skin_temp_mean: 33.5
+  skin_temp_std: 0.5
+  # Label generation
+  anomaly_probability: 0.15
+  label_noise: 0.05
