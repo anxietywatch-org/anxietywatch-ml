@@ -1,0 +1,78 @@
+# ruff CI gate — strict clean subset + explicit debt ignore
+# 
+# This config is used by CI to enforce a green quality gate TODAY
+# while documenting known debt that is deferred.
+# 
+# To harden later: remove entries from `ignore` as debt is paid down.
+# Run locally EXACTLY as CI: `python -m ruff check src tests --config .ruff-ci.toml`
+
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "C4", "PTH", "PL", "SIM", "T20"]
+
+# Project-wide deliberate ignores (from pyproject.toml) + Known debt (clean subset for CI gate):
+# The following codes have existing violations and are temporarily excluded.
+# Counts from `python -m ruff check src tests --statistics` at time of hardening:
+#
+# PLR2004 (75) — magic-value-comparison
+# UP045   (75) — non-pep604-annotation-optional (Optional[X] vs X|None)
+# UP017   (42) — datetime-timezone-utc (datetime.now(timezone.utc) vs UTC)
+# PLC0415 (28) — import-outside-top-level
+# F401    (18) — unused-import
+# B904    (11) — raise-without-from-inside-except
+# I001    (11) — unsorted-imports
+# PLR0913 (11) — too-many-arguments
+# PLR0917 (11) — too-many-positional-arguments
+# E501    (10) — line-too-long
+# T201     (7) — print
+# F841     (6) — unused-variable
+# B905     (4) — zip-without-explicit-strict
+# UP037    (4) — quoted-annotation
+# PLR0912  (3) — too-many-branches
+# B007     (2) — unused-loop-control-variable
+# F541     (2) — f-string-missing-placeholders
+# PLR0915  (2) — too-many-statements
+# PLW2901  (2) — redefined-loop-name
+# SIM108   (2) — if-else-block-instead-of-if-exp
+# UP042    (2) — replace-str-enum
+# PTH123   (1) — builtin-open
+# SIM102   (1) — collapsible-if
+# SIM103   (1) — needless-bool
+# UP015    (1) — redundant-open-modes
+#
+# To harden: fix violations (auto-fix with `ruff check --fix` where safe, or manual)
+# then remove the code from this ignore list.
+ignore = [
+    # Project-wide deliberate ignores
+    "S101",   # assert used in tests (bandit)
+    "S311",   # random used for tests (bandit)
+    "B008",   # function default argument mutable (bandit) — deliberate project choice
+    # Known debt (temporarily excluded)
+    "PLR2004",
+    "UP045",
+    "UP017",
+    "PLC0415",
+    "F401",
+    "B904",
+    "I001",
+    "PLR0913",
+    "PLR0917",
+    "E501",
+    "T201",
+    "F841",
+    "B905",
+    "UP037",
+    "PLR0912",
+    "B007",
+    "F541",
+    "PLR0915",
+    "PLW2901",
+    "SIM108",
+    "UP042",
+    "PTH123",
+    "SIM102",
+    "SIM103",
+    "UP015",
+]
