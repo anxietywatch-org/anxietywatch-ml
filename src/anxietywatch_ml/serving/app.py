@@ -123,7 +123,14 @@ def create_app(
     app = FastAPI(title="AnxietyWatch Prototype Inference", version="0.1.0")
 
     require_api_key = _api_key_guard(configured_key)
-    window_processor = EventWindowProcessor(predictor) if predictor is not None else None
+    # The raw-window processor derives its window/cleaning/feature contract from
+    # the training-time config embedded in the loaded bundle (training-serving
+    # skew elimination), never from hardcoded values.
+    window_processor = (
+        EventWindowProcessor.from_bundle(predictor.bundle, predictor=predictor)
+        if predictor is not None
+        else None
+    )
 
     @app.get("/health", response_model=HealthResponse)
     def health():

@@ -1,13 +1,19 @@
 """Tests for the event-anchored raw-window inference endpoint (007-B1).
 
 Covers the /predict/window contract, API-key authentication, window
-validation gates, determinism and — critically — feature parity between the
-serving path (EventWindowProcessor) and the offline GroundTruthDatasetBuilder
-path.
+validation gates, determinism and — critically — training-serving config
+parity between the serving path (EventWindowProcessor.from_bundle) and the
+offline GroundTruthDatasetBuilder path.
+
+The window contract is NEVER hardcoded in serving: it is derived from the
+training-time config embedded in the serialized bundle. The regression tests
+below prove that a NON-default window contract (90s / 20 samples / 0.4 HR
+ratio) is honored consistently by BOTH paths, so serving cannot silently drift
+back to a different (e.g. 60s / 10 / 0.3) contract.
 """
 
 import copy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -21,19 +27,22 @@ from anxietywatch_ml.ground_truth.builder import (
 from anxietywatch_ml.ground_truth.synthetic import create_ground_truth_generator
 from anxietywatch_ml.serving import (
     FEATURE_SCHEMA,
-    MIN_HR_RATIO,
-    MIN_WINDOW_SAMPLES,
-    WINDOW_SIZE_SECONDS,
     GroundTruthPredictor,
     PredictWindowRequest,
     create_app,
     train_demo_model,
 )
+from anxietywatch_ml.serving.predictor import PredictorError
 from anxietywatch_ml.serving.window_inference import EventWindowProcessor
 from anxietywatch_ml.training import load_ground_truth_bundle
 
 TEST_API_KEY = "test-window-api-key-007-b1"
 AUTH_HEADERS = {"X-Api-Key": TEST_API_KEY}
+
+# A non-default window contract used to prove training-serving config parity.
+CUSTOM_WINDOW_SIZE = 90.0
+CUSTOM_MIN_SAMPLES = 20
+CUSTOM_MIN_HR_RATIO = 0.4
 
 
 @pytest.fixture(scope="module")
@@ -42,8 +51,24 @@ def config():
 
 
 @pytest.fixture(scope="module")
+def custom_config(config):
+    cfg = copy.deepcopy(config)
+    cfg["ground_truth"]["window_size_seconds"] = CUSTOM_WINDOW_SIZE
+    cfg["ground_truth"]["min_samples_per_window"] = CUSTOM_MIN_SAMPLES
+    cfg["ground_truth"]["min_hr_ratio"] = CUSTOM_MIN_HR_RATIO
+    cfg["window"]["size_seconds"] = CUSTOM_WINDOW_SIZE
+    return cfg
+
+
+@pytest.fixture(scope="module")
 def docs(config):
     generator = create_ground_truth_generator(config)
+    return generator.generate_docs(n_events=5)
+
+
+@pytest.fixture(scope="module")
+def custom_docs(custom_config):
+    generator = create_ground_truth_generator(custom_config)
     return generator.generate_docs(n_events=5)
 
 
@@ -56,9 +81,26 @@ def dataset(config, docs):
 
 
 @pytest.fixture(scope="module")
+def custom_dataset(custom_config, custom_docs):
+    builder = create_ground_truth_builder(custom_config)
+    return builder.build(
+        custom_docs["telemetry_batches"],
+        custom_docs["suspected_events"],
+        custom_docs["event_decisions"],
+    )
+
+
+@pytest.fixture(scope="module")
 def bundle_path(config, tmp_path_factory):
     out = tmp_path_factory.mktemp("window_serving") / "demo.pkl"
     train_demo_model(config, output_path=out)
+    return out
+
+
+@pytest.fixture(scope="module")
+def custom_bundle_path(custom_config, tmp_path_factory):
+    out = tmp_path_factory.mktemp("window_custom") / "custom.pkl"
+    train_demo_model(custom_config, output_path=out)
     return out
 
 
@@ -85,9 +127,9 @@ def _window_payload(docs, index):
     }
 
 
-def _in_window_samples(payload):
+def _in_window_samples(payload, window_size: float = 60.0):
     t_end = datetime.fromisoformat(payload["detectedAt"])
-    t_start = t_end - timedelta(seconds=WINDOW_SIZE_SECONDS)
+    t_start = t_end - timedelta(seconds=window_size)
     return [
         s
         for s in payload["samples"]
@@ -95,12 +137,83 @@ def _in_window_samples(payload):
     ]
 
 
-class TestWindowConstants:
-    def test_constants_match_ground_truth_builder(self):
-        cfg = GroundTruthBuilderConfig()
-        assert cfg.window_size_seconds == WINDOW_SIZE_SECONDS
-        assert cfg.min_samples_per_window == MIN_WINDOW_SAMPLES
-        assert cfg.min_hr_ratio == MIN_HR_RATIO
+def _hr_sample_at(iso_time, hr=70.0):
+    return {
+        "timestamp": iso_time,
+        "heartRateBpm": hr,
+        "ibiMs": [],
+        "skinTemperatureCelsius": 33.0,
+        "quality": {"heartRate": "good", "ibi": "good", "wearingState": "onBody"},
+    }
+
+
+def _handcrafted_request(detected_at, samples):
+    return PredictWindowRequest(
+        eventId="0d2a0d72-b0ff-4a0b-ba4f-6a8f2a0d3c1e",
+        deviceId="22222222-2222-4222-8222-222222222222",
+        sessionId="44444444-4444-4444-8444-444444444444",
+        detectedAt=detected_at.isoformat(),
+        samples=samples,
+    )
+
+
+class TestWindowConfigSource:
+    def test_default_processor_matches_offline_default_builder(self, config):
+        assert EventWindowProcessor().window_config == GroundTruthBuilderConfig()
+        assert create_ground_truth_builder(config).config == GroundTruthBuilderConfig()
+
+    def test_from_bundle_honors_non_default_training_config(
+        self, custom_config, custom_bundle_path
+    ):
+        bundle = load_ground_truth_bundle(custom_bundle_path)
+        processor = EventWindowProcessor.from_bundle(bundle)
+        expected = GroundTruthBuilderConfig(
+            window_size_seconds=CUSTOM_WINDOW_SIZE,
+            min_samples_per_window=CUSTOM_MIN_SAMPLES,
+            min_hr_ratio=CUSTOM_MIN_HR_RATIO,
+        )
+        assert processor.window_config == expected
+        assert processor.window_config != GroundTruthBuilderConfig()
+        assert create_ground_truth_builder(custom_config).config == expected
+
+    def test_bundle_carries_training_config(self, custom_bundle_path):
+        bundle = load_ground_truth_bundle(custom_bundle_path)
+        gt = bundle.runtime_config["ground_truth"]
+        assert gt["window_size_seconds"] == CUSTOM_WINDOW_SIZE
+        assert gt["min_samples_per_window"] == CUSTOM_MIN_SAMPLES
+        assert gt["min_hr_ratio"] == CUSTOM_MIN_HR_RATIO
+
+    def test_custom_window_size_enforced_by_serving(self, custom_bundle_path):
+        bundle = load_ground_truth_bundle(custom_bundle_path)
+        processor = EventWindowProcessor.from_bundle(bundle)
+        detected_at = datetime(2026, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # 30 samples covering [T-100, T-71]: inside a 90s window, outside a 60s one.
+        samples = [
+            _hr_sample_at((detected_at - timedelta(seconds=100 - i)).isoformat())
+            for i in range(30)
+        ]
+        request = _handcrafted_request(detected_at, samples)
+        features = processor.build_features(request)
+        assert features["sample_count"] == pytest.approx(CUSTOM_WINDOW_SIZE - 70)
+        # A processor on the DEFAULT contract would trim to [T-60, T] and find nothing.
+        with pytest.raises(PredictorError, match="window"):
+            EventWindowProcessor().build_features(request)
+
+    def test_custom_min_samples_enforced_by_serving(self, custom_bundle_path):
+        bundle = load_ground_truth_bundle(custom_bundle_path)
+        processor = EventWindowProcessor.from_bundle(bundle)
+        detected_at = datetime(2026, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # 15 samples in [T-60, T]: inside BOTH windows, passes the default 10,
+        # fails the custom 20.
+        samples = [
+            _hr_sample_at((detected_at - timedelta(seconds=60 - i)).isoformat())
+            for i in range(15)
+        ]
+        request = _handcrafted_request(detected_at, samples)
+        with pytest.raises(PredictorError, match="insufficient window data"):
+            processor.build_features(request)
+        default_features = EventWindowProcessor().build_features(request)
+        assert default_features["sample_count"] == pytest.approx(15)
 
 
 class TestWindowAuthentication:
@@ -131,11 +244,7 @@ class TestWindowAuthentication:
 
 
 def _window_payload_from_docs():
-    """Placeholder replaced by a module-scoped fixture-free helper.
-
-    Authentication tests only need *a* syntactically valid body; it never
-    reaches the handler. Build one lazily from the shared docs.
-    """
+    """Build a syntactically valid body lazily (never reaches the handler)."""
     from anxietywatch_ml.config import load_config
     from anxietywatch_ml.ground_truth.synthetic import create_ground_truth_generator
 
@@ -218,13 +327,7 @@ class TestWindowEndpoint:
         detected_at = datetime.fromisoformat(payload["detectedAt"])
         before = detected_at - timedelta(seconds=180)
         payload["samples"] = [
-            {
-                "timestamp": (before + timedelta(seconds=i)).isoformat(),
-                "heartRateBpm": 70.0,
-                "ibiMs": [],
-                "skinTemperatureCelsius": 33.0,
-                "quality": {"heartRate": "good", "ibi": "good", "wearingState": "onBody"},
-            }
+            _hr_sample_at((before + timedelta(seconds=i)).isoformat())
             for i in range(20)
         ]
         response = client.post("/predict/window", json=payload, headers=AUTH_HEADERS)
@@ -232,41 +335,31 @@ class TestWindowEndpoint:
         assert "window" in response.json()["detail"]
 
     def test_too_few_in_window_samples_rejected(self, client, docs):
+        min_samples = GroundTruthBuilderConfig().min_samples_per_window
         payload = _window_payload(docs, 0)
         detected_at = datetime.fromisoformat(payload["detectedAt"])
         payload["samples"] = [
-            {
-                "timestamp": (
-                    detected_at - timedelta(seconds=MIN_WINDOW_SAMPLES + 5 - i)
-                ).isoformat(),
-                "heartRateBpm": 70.0 + i,
-                "ibiMs": [],
-                "skinTemperatureCelsius": 33.0,
-                "quality": {"heartRate": "good", "ibi": "good", "wearingState": "onBody"},
-            }
-            for i in range(MIN_WINDOW_SAMPLES - 1)
+            _hr_sample_at(
+                (detected_at - timedelta(seconds=min_samples + 5 - i)).isoformat(),
+                hr=70.0 + i,
+            )
+            for i in range(min_samples - 1)
         ]
         response = client.post("/predict/window", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 400
-        assert str(MIN_WINDOW_SAMPLES) in response.json()["detail"]
+        assert str(min_samples) in response.json()["detail"]
 
     def test_insufficient_hr_coverage_rejected(self, client, docs):
+        min_samples = GroundTruthBuilderConfig().min_samples_per_window
         payload = _window_payload(docs, 0)
         detected_at = datetime.fromisoformat(payload["detectedAt"])
-        samples = []
-        for i in range(MIN_WINDOW_SAMPLES + 5):
-            samples.append(
-                {
-                    "timestamp": (
-                        detected_at - timedelta(seconds=MIN_WINDOW_SAMPLES + 5 - i)
-                    ).isoformat(),
-                    "heartRateBpm": 70.0 + i if i < 3 else None,
-                    "ibiMs": [],
-                    "skinTemperatureCelsius": 33.0,
-                    "quality": {"heartRate": "good", "ibi": "good", "wearingState": "onBody"},
-                }
+        payload["samples"] = [
+            _hr_sample_at(
+                (detected_at - timedelta(seconds=min_samples + 5 - i)).isoformat(),
+                hr=70.0 + i if i < 3 else None,
             )
-        payload["samples"] = samples
+            for i in range(min_samples + 5)
+        ]
         response = client.post("/predict/window", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 400
         assert "heart-rate coverage" in response.json()["detail"]
@@ -274,7 +367,7 @@ class TestWindowEndpoint:
     def test_out_of_window_samples_ignored(self, client, docs):
         payload = _window_payload(docs, 0)
         in_window = _in_window_samples(payload)
-        assert len(in_window) >= MIN_WINDOW_SAMPLES
+        assert len(in_window) >= GroundTruthBuilderConfig().min_samples_per_window
         minimal = dict(payload)
         minimal["samples"] = in_window
         body_minimal = client.post("/predict/window", json=minimal, headers=AUTH_HEADERS).json()
@@ -284,15 +377,7 @@ class TestWindowEndpoint:
         detected_at = datetime.fromisoformat(payload["detectedAt"])
         base = detected_at - timedelta(minutes=30)
         for i in range(700):
-            extra.append(
-                {
-                    "timestamp": (base + timedelta(seconds=i)).isoformat(),
-                    "heartRateBpm": 70.0,
-                    "ibiMs": [],
-                    "skinTemperatureCelsius": 33.0,
-                    "quality": {"heartRate": "good", "ibi": "good", "wearingState": "onBody"},
-                }
-            )
+            extra.append(_hr_sample_at((base + timedelta(seconds=i)).isoformat()))
         full = dict(payload)
         full["samples"] = in_window + extra
         body_full = client.post("/predict/window", json=full, headers=AUTH_HEADERS).json()
@@ -349,6 +434,33 @@ class TestWindowParityWithGroundTruth:
             compared += 1
         assert compared >= 3
 
+    def test_custom_config_offline_serving_parity(
+        self, custom_docs, custom_dataset, custom_bundle_path
+    ):
+        bundle = load_ground_truth_bundle(custom_bundle_path)
+        processor = EventWindowProcessor.from_bundle(bundle)
+        kept = set(custom_dataset.metadata["event_id"].astype(str))
+        compared = 0
+        for index, suspected in enumerate(custom_docs["suspected_events"]):
+            event_id = str(suspected["eventId"])
+            if event_id not in kept:
+                continue
+            row_idx = custom_dataset.metadata.index[
+                custom_dataset.metadata["event_id"] == event_id
+            ][0]
+            request = PredictWindowRequest(**_window_payload(custom_docs, index))
+            serving = processor.build_features(request)
+            offline = custom_dataset.X.iloc[row_idx]
+            for name in FEATURE_SCHEMA:
+                s = serving[name]
+                o = offline[name]
+                if pd.isna(o):
+                    assert s is None, (name, s, o)
+                else:
+                    assert s == pytest.approx(float(o), abs=1e-9), (name, s, o)
+            compared += 1
+        assert compared >= 3
+
     def test_window_prediction_uses_existing_predictor(self, docs, bundle_path, monkeypatch):
         predictor = GroundTruthPredictor.from_path(bundle_path)
 
@@ -356,6 +468,6 @@ class TestWindowParityWithGroundTruth:
             raise AssertionError("fit() must never run during inference")
 
         monkeypatch.setattr(predictor.bundle.model, "fit", boom)
-        processor = EventWindowProcessor(predictor)
+        processor = EventWindowProcessor.from_bundle(predictor.bundle, predictor=predictor)
         response = processor.predict(PredictWindowRequest(**_window_payload(docs, 0)))
         assert response.prediction in (0, 1)

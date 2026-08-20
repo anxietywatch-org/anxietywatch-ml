@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from anxietywatch_ml.contracts.normalize import IdentityMismatchError
 from anxietywatch_ml.contracts.telemetry import TelemetryBatch, TelemetryBatchAdapter
 from anxietywatch_ml.features.builder import FeatureBuilder, create_feature_builder
-from anxietywatch_ml.preprocessing.pipeline import PreprocessingPipeline
+from anxietywatch_ml.preprocessing.pipeline import PreprocessingPipeline, create_pipeline
 
 from .contracts import EventDecision, EventDecisionAdapter, SuspectedEvent, SuspectedEventAdapter
 from .label_policy import LabelPolicyResult, apply_label_policy
@@ -134,10 +134,11 @@ class GroundTruthDatasetBuilder:
         self,
         config: Optional[GroundTruthBuilderConfig] = None,
         feature_builder: Optional[FeatureBuilder] = None,
+        preprocessing: Optional[PreprocessingPipeline] = None,
     ):
         self.config = config or GroundTruthBuilderConfig()
         self.feature_builder = feature_builder or FeatureBuilder()
-        self._prep = PreprocessingPipeline()
+        self._prep = preprocessing or PreprocessingPipeline()
 
     def build(
         self,
@@ -497,11 +498,20 @@ class GroundTruthDatasetBuilder:
         return True
 
 
-def create_ground_truth_builder(config: dict) -> GroundTruthDatasetBuilder:
-    """Factory function to create a builder from config."""
+def create_ground_truth_builder_config(config: dict) -> GroundTruthBuilderConfig:
+    """Canonical window contract for one config dict.
+
+    Single shared source of truth, consumed by BOTH the offline dataset builder
+    (:func:`create_ground_truth_builder`) and the serving raw-window processor
+    (:meth:`~anxietywatch_ml.serving.window_inference.EventWindowProcessor.
+    from_bundle`, which reads the SAME values captured at training time and
+    embedded in the serialized bundle's ``runtime_config``). This is the
+    training-serving-skew guarantee: there is exactly one definition of
+    window size / min samples / min HR ratio.
+    """
     window_cfg = config.get("window", {})
     gt_cfg = config.get("ground_truth", {})
-    builder_config = GroundTruthBuilderConfig(
+    return GroundTruthBuilderConfig(
         window_size_seconds=gt_cfg.get(
             "window_size_seconds", window_cfg.get("size_seconds", 60)
         ),
@@ -510,4 +520,12 @@ def create_ground_truth_builder(config: dict) -> GroundTruthDatasetBuilder:
         ),
         min_hr_ratio=gt_cfg.get("min_hr_ratio", 0.3),
     )
-    return GroundTruthDatasetBuilder(builder_config, create_feature_builder(config))
+
+
+def create_ground_truth_builder(config: dict) -> GroundTruthDatasetBuilder:
+    """Factory function to create a builder from config."""
+    return GroundTruthDatasetBuilder(
+        create_ground_truth_builder_config(config),
+        create_feature_builder(config),
+        create_pipeline(config),
+    )

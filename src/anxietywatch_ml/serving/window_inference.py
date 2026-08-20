@@ -3,14 +3,21 @@
 The ML service owns windowing: a ``PredictWindowRequest`` carries the raw
 telemetry covering the detector event period (possibly spanning several backend
 batches - there is no ``batchId``), and this module flattens, sorts, trims to
-``[detectedAt - 60s, detectedAt]``, validates data quality and reuses the
-EXACT canonical preprocessing/feature-building path shared with training, then
-delegates to the existing :class:`GroundTruthPredictor`.
+``[detectedAt - window_size, detectedAt]``, validates data quality and reuses
+the EXACT canonical preprocessing/feature-building path shared with training,
+then delegates to the existing :class:`GroundTruthPredictor`.
 
-Mirrors the ground-truth dataset builder semantics:
-- window selection ``[T-60s, T]`` inclusive (ground_truth.builder._select_window)
-- ``min_samples_per_window = 10`` and ``min_hr_ratio = 0.3`` (configs/base.yaml
-  ``ground_truth`` and PreprocessingConfig defaults)
+Training-serving skew elimination
+---------------------------------
+The processor NEVER hardcodes a window contract. In production it is built via
+:meth:`EventWindowProcessor.from_bundle`, which reads the training-time config
+embedded in the serialized bundle (``runtime_config``) and derives the window
+contract (``GroundTruthBuilderConfig``), the preprocessing pipeline
+(``create_pipeline``) and the feature builder (``create_feature_builder``)
+through the SAME factories the offline
+:func:`~anxietywatch_ml.ground_truth.builder.create_ground_truth_builder` uses.
+A bundle retrained with a different window (e.g. 90s / 20 samples) is therefore
+served with that exact contract automatically.
 """
 
 from datetime import timedelta
@@ -18,21 +25,19 @@ from typing import Optional
 
 import pandas as pd
 
-from anxietywatch_ml.features.builder import FeatureBuilder
-from anxietywatch_ml.preprocessing.pipeline import PreprocessingPipeline
+from anxietywatch_ml.features.builder import FeatureBuilder, create_feature_builder
+from anxietywatch_ml.ground_truth.builder import (
+    GroundTruthBuilderConfig,
+    create_ground_truth_builder_config,
+)
+from anxietywatch_ml.pipelines.model_pipeline import TrainedModelBundle
+from anxietywatch_ml.preprocessing.pipeline import PreprocessingPipeline, create_pipeline
 from anxietywatch_ml.serving.contracts import (
     FEATURE_SCHEMA,
     PredictResponse,
     PredictWindowRequest,
 )
 from anxietywatch_ml.serving.predictor import GroundTruthPredictor, PredictorError
-
-# Canonical event window anchored at detectedAt (matches ground_truth.builder
-# and configs/base.yaml ground_truth.window_size_seconds).
-WINDOW_SIZE_SECONDS = 60.0
-# Data-quality gates (configs/base.yaml ground_truth + PreprocessingConfig).
-MIN_WINDOW_SAMPLES = 10
-MIN_HR_RATIO = 0.3
 
 
 class EventWindowProcessor:
@@ -41,12 +46,44 @@ class EventWindowProcessor:
     def __init__(
         self,
         predictor: Optional[GroundTruthPredictor] = None,
+        window_config: Optional[GroundTruthBuilderConfig] = None,
         preprocessing: Optional[PreprocessingPipeline] = None,
         feature_builder: Optional[FeatureBuilder] = None,
     ):
         self.predictor = predictor
+        # Defaults mirror the offline GroundTruthDatasetBuilder defaults exactly
+        # (same canonical objects), so a config-free processor and a config-free
+        # builder can never diverge.
+        self._window_config = window_config or GroundTruthBuilderConfig()
         self._prep = preprocessing or PreprocessingPipeline()
         self._feature_builder = feature_builder or FeatureBuilder()
+
+    @property
+    def window_config(self) -> GroundTruthBuilderConfig:
+        """The window contract this processor enforces (single shared source)."""
+        return self._window_config
+
+    @classmethod
+    def from_bundle(
+        cls,
+        bundle: TrainedModelBundle,
+        predictor: Optional[GroundTruthPredictor] = None,
+    ) -> "EventWindowProcessor":
+        """Build a processor from the training-time config in a serialized bundle.
+
+        The bundle captures the full ``config`` dict at training time in
+        ``runtime_config`` (ground_truth / window / features / preprocessing).
+        Deriving the window contract, preprocessing and feature builder from
+        that embedded config via the SAME factories as the offline builder is
+        what guarantees training-serving parity for any retrained artifact.
+        """
+        runtime_config = bundle.runtime_config or {}
+        return cls(
+            predictor=predictor,
+            window_config=create_ground_truth_builder_config(runtime_config),
+            preprocessing=create_pipeline(runtime_config),
+            feature_builder=create_feature_builder(runtime_config),
+        )
 
     def build_features(self, request: PredictWindowRequest) -> dict:
         """Build the 16-feature vector for an event-anchored raw window.
@@ -54,6 +91,10 @@ class EventWindowProcessor:
         This is the parity surface tested against the offline
         GroundTruthDatasetBuilder path. No model is involved.
         """
+        window_size = float(self._window_config.window_size_seconds)
+        min_samples = int(self._window_config.min_samples_per_window)
+        min_hr_ratio = float(self._window_config.min_hr_ratio)
+
         flat = self._prep.flatten_samples(
             request.samples,
             user_id=request.user_id,
@@ -63,24 +104,24 @@ class EventWindowProcessor:
         flat = flat.sort_values("timestamp").reset_index(drop=True)
 
         t_end = request.detected_at
-        t_start = t_end - timedelta(seconds=WINDOW_SIZE_SECONDS)
+        t_start = t_end - timedelta(seconds=window_size)
         window = flat[(flat["timestamp"] >= t_start) & (flat["timestamp"] <= t_end)].copy()
 
         if window.empty:
             raise PredictorError(
                 "no telemetry samples fall within the "
-                "[detectedAt - 60s, detectedAt] window"
+                f"[detectedAt - {window_size:.0f}s, detectedAt] window"
             )
-        if len(window) < MIN_WINDOW_SAMPLES:
+        if len(window) < min_samples:
             raise PredictorError(
                 f"insufficient window data: {len(window)} samples < "
-                f"{MIN_WINDOW_SAMPLES} required"
+                f"{min_samples} required"
             )
         hr_ratio = float(window["heart_rate_bpm"].notna().mean())
-        if hr_ratio < MIN_HR_RATIO:
+        if hr_ratio < min_hr_ratio:
             raise PredictorError(
                 f"insufficient heart-rate coverage: {hr_ratio:.3f} < "
-                f"{MIN_HR_RATIO} required"
+                f"{min_hr_ratio} required"
             )
 
         cleaned = self._prep.clean_window(window)

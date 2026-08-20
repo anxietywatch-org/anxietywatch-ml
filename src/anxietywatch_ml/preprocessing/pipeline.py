@@ -300,10 +300,20 @@ class PreprocessingPipeline:
 
 
 def create_pipeline(config: dict) -> PreprocessingPipeline:
-    """Factory function to create preprocessing pipeline from config."""
+    """Factory function to create preprocessing pipeline from config.
+
+    Reads ``config["window"]`` (segmentation) and ``config["preprocessing"]``
+    (cleaning: ``max_gap_seconds``, ``hr_outlier_std``). Used by BOTH the
+    offline ground-truth builder and the serving raw-window processor so the
+    cleaning contract cannot diverge between training and inference.
+    """
+    window_cfg = config.get("window", {})
+    prep_cfg = config.get("preprocessing", {})
     prep_config = PreprocessingConfig(
-        window_size_seconds=config.get("window", {}).get("size_seconds", 60),
-        stride_seconds=config.get("window", {}).get("stride_seconds", 30),
-        min_samples_per_window=config.get("window", {}).get("min_samples_per_window", 10),
+        window_size_seconds=window_cfg.get("size_seconds", 60),
+        stride_seconds=window_cfg.get("stride_seconds", 30),
+        min_samples_per_window=window_cfg.get("min_samples_per_window", 10),
+        max_gap_seconds=prep_cfg.get("max_gap_seconds", 60.0),
+        hr_outlier_std=prep_cfg.get("hr_outlier_std", 3.0),
     )
     return PreprocessingPipeline(prep_config)

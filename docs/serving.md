@@ -170,17 +170,35 @@ the 16-feature vector is identical to the offline ground-truth path.
   (`extra="forbid"`, 422).
 - Transport is camelCase; snake_case is also accepted (canonical normalization).
 
-Data-quality gates (identical to the ground-truth dataset builder):
+Data-quality gates — **NOT hardcoded**: they come from the trained bundle's
+training-time config (``runtime_config``), read through the SAME canonical
+factory the offline ``GroundTruthDatasetBuilder`` uses
+(``create_ground_truth_builder_config``). A bundle retrained with a different
+window contract (e.g. 90s / 20 samples) is served with that contract
+automatically; serving cannot silently keep 60s / 10 / 0.30. The values below
+are the current default artifact's.
 
-| gate                    | value                                  |
-| ----------------------- | -------------------------------------- |
-| window                 | `[detectedAt - 60s, detectedAt]` (incl.) |
-| min in-window samples  | `10`                                   |
-| min HR presence ratio  | `0.30`                                 |
-| cleaning               | canonical missing-value + HR-outlier   |
+| gate                    | default artifact value |
+| ----------------------- | ---------------------- |
+| window                  | `[detectedAt - 60s, detectedAt]` (incl.) |
+| min in-window samples   | `10`                   |
+| min HR presence ratio   | `0.30`                 |
+| cleaning                | canonical missing-value + HR-outlier   |
 
 Violations return `400` (with a `PredictorError` message), never a fabricated
 prediction.
+
+## Training-serving configuration parity
+
+The raw-window endpoint never declares its own window constants. At startup
+``EventWindowProcessor.from_bundle`` reads the config the model was trained
+with (embedded in the serialized bundle as ``runtime_config``) and derives the
+window contract, the preprocessing pipeline and the feature builder through the
+exact same factories as the offline path (``create_ground_truth_builder_config``,
+``create_pipeline``, ``create_feature_builder``). Training and serving therefore
+share one definition of window size / min samples / min HR ratio / cleaning /
+features, eliminating the training-serving skew this endpoint was designed to
+avoid.
 
 ## Health (`GET /health`)
 
@@ -221,7 +239,7 @@ prediction.
 | `ANXIETYWATCH_MODEL_PATH`    | `models/prototype_v0.1.0.pkl`        | path to the trained bundle (`.pkl`)          |
 | `ANXIETYWATCH_REQUIRE_MODEL` | unset → `false` (dev)                | `true` ⇒ startup fails if artifact missing   |
 | `ANXIETYWATCH_API_KEY`       | unset                                | inference auth (`X-Api-Key`); unset ⇒ 503    |
-| `PORT`                       | `8000`                               | ASGI bind port (Container Apps sets `PORT`)  |
+| `PORT`                       | `8000`                               | ASGI bind port; configured as 8000 for the current deployment |
 
 `create_app(model_path=..., require_model=..., api_key=...)` overrides all
 three in tests/code.

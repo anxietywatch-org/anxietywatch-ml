@@ -22,12 +22,7 @@ from anxietywatch_ml.serving.predictor import (
     PredictorError,
 )
 from anxietywatch_ml.serving.train_demo import train_demo_model
-from anxietywatch_ml.serving.window_inference import (
-    MIN_HR_RATIO,
-    MIN_WINDOW_SAMPLES,
-    WINDOW_SIZE_SECONDS,
-    EventWindowProcessor,
-)
+from anxietywatch_ml.serving.window_inference import EventWindowProcessor
 
 __all__ = [
     "API_KEY_ENV",
@@ -37,13 +32,10 @@ __all__ = [
     "FORBIDDEN_FEATURES",
     "GroundTruthPredictor",
     "HealthResponse",
-    "MIN_HR_RATIO",
-    "MIN_WINDOW_SAMPLES",
     "PredictRequest",
     "PredictResponse",
     "PredictWindowRequest",
     "PredictorError",
-    "WINDOW_SIZE_SECONDS",
     "app",
     "create_app",
     "train_demo_model",
