@@ -341,10 +341,12 @@ class GroundTruthDatasetBuilder:
         return hr_ratio >= self.config.min_hr_ratio
 
     def _clean_window(self, window: pd.DataFrame) -> pd.DataFrame:
-        """Apply the shared preprocessing steps (missing values, outliers)."""
-        cleaned = self._prep._handle_missing_values(window)
-        cleaned = self._prep._detect_outliers(cleaned)
-        return cleaned
+        """Apply the shared preprocessing steps (missing values, outliers).
+
+        Delegates to the public :meth:`PreprocessingPipeline.clean_window` so
+        training and serving consume one canonical implementation.
+        """
+        return self._prep.clean_window(window)
 
     def _build_metadata(
         self,

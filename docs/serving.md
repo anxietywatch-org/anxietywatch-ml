@@ -13,8 +13,11 @@ FastAPI HTTP service that serves one trained GroundTruth bundle.
 
 ## Scope
 
-- HTTP: `GET /health`, `POST /predict`.
+- HTTP: `GET /health`, `POST /predict`, `POST /predict/window`.
 - The model is loaded ONCE at application startup.
+- Inference endpoints require an API key (`X-Api-Key`). `/health` is exempt.
+- The ML service owns windowing (`/predict/window`); the backend never sends
+  pre-computed windows or features.
 - No online auto-learning, no Azure, no backend/Watch/Fog integration.
 
 ## Artifact
@@ -90,7 +93,7 @@ Never accepted: `detector_score`, `detector_state`, `rules_version`,
 {
   "prediction": 1,
   "support_probability": 0.73,
-  "threshold": 0.50,
+  "threshold": 0.63,
   "model_version": "0.1.0",
   "target": "target_support_requested"
 }
@@ -99,8 +102,85 @@ Never accepted: `detector_score`, `detector_state`, `rules_version`,
 - `prediction`: `1` iff `support_probability >= threshold`.
 - `support_probability`: positive-class probability from the trained model.
 - `threshold`: the training metadata threshold. Never silently 0.5, never
-  recomputed at inference time.
+  recomputed at inference time. (The `0.63` above is illustrative; the actual
+  value comes from the deployed bundle's training metadata.)
 - `model_version` / `target`: from training metadata.
+
+## Authentication
+
+Inference endpoints (`POST /predict`, `POST /predict/window`) require the
+header `X-Api-Key` set to `ANXIETYWATCH_API_KEY`. Comparison is constant-time
+(`secrets.compare_digest`). The key is never logged, echoed, or returned.
+
+| situation                                  | status | detail                                  |
+| ------------------------------------------ | ------ | --------------------------------------- |
+| key not configured (`ANXIETYWATCH_API_KEY` unset) | 503 | `inference authentication is not configured` |
+| missing `X-Api-Key` header                 | 401    | `missing API key`                        |
+| wrong `X-Api-Key` value                    | 401    | `invalid API key`                        |
+
+Secure default: if no key is configured the inference endpoints refuse
+everything with 503 — they never become public. Configure the key as an Azure
+Container Apps secret (`ANXIETYWATCH_API_KEY`) before enabling traffic.
+`GET /health` stays unauthenticated so probes work.
+
+Example:
+
+```bash
+curl -X POST http://localhost:8000/predict/window \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: $ANXIETYWATCH_API_KEY" \
+  -d @window.json
+```
+
+## Request (`POST /predict/window`)
+
+Event-anchored **raw telemetry** window. The ML service owns windowing:
+samples are flattened, sorted by timestamp, trimmed to
+`[detectedAt - 60s, detectedAt]` (inclusive), validated, cleaned with the
+canonical training preprocessing and fed through the same `FeatureBuilder`, so
+the 16-feature vector is identical to the offline ground-truth path.
+
+```json
+{
+  "eventId": "0d2a0d72-b0ff-4a0b-ba4f-6a8f2a0d3c1e",
+  "deviceId": "22222222-2222-4222-8222-222222222222",
+  "sessionId": "44444444-4444-4444-8444-444444444444",
+  "detectedAt": "2026-01-15T10:00:00+00:00",
+  "samples": [
+    {
+      "timestamp": "2026-01-15T09:59:00+00:00",
+      "heartRateBpm": 88.5,
+      "ibiMs": [812.4, 803.1, 818.9],
+      "skinTemperatureCelsius": 33.1,
+      "quality": { "heartRate": "good", "ibi": "good", "wearingState": "onBody" }
+    }
+  ]
+}
+```
+
+- `eventId` / `deviceId` / `sessionId` / `detectedAt`: the detector event that
+  anchors the window. Identifiers are correlation/parity metadata only; they are
+  never part of the feature matrix.
+- `userId`: optional — not required for correct windowing; omit unless identity
+  scoping is genuinely needed.
+- `samples`: raw samples covering the event period. May span several backend
+  batches — there is intentionally **no `batchId`** here (backend batches are
+  arbitrary 1–600 sample chunks, not windows). Samples outside
+  `[detectedAt - 60s, detectedAt]` are ignored. Unknown keys are rejected
+  (`extra="forbid"`, 422).
+- Transport is camelCase; snake_case is also accepted (canonical normalization).
+
+Data-quality gates (identical to the ground-truth dataset builder):
+
+| gate                    | value                                  |
+| ----------------------- | -------------------------------------- |
+| window                 | `[detectedAt - 60s, detectedAt]` (incl.) |
+| min in-window samples  | `10`                                   |
+| min HR presence ratio  | `0.30`                                 |
+| cleaning               | canonical missing-value + HR-outlier   |
+
+Violations return `400` (with a `PredictorError` message), never a fabricated
+prediction.
 
 ## Health (`GET /health`)
 
@@ -125,6 +205,12 @@ Never accepted: `detector_score`, `detector_state`, `rules_version`,
 | extra/prohibited (leakage) key    | 422    |
 | non-numeric value                 | 422    |
 | non-finite (`Infinity`) value     | 400    |
+| window: no samples in `[T-60s, T]`| 400    |
+| window: < 10 in-window samples   | 400    |
+| window: HR presence ratio < 0.30  | 400    |
+| missing `X-Api-Key`               | 401    |
+| invalid `X-Api-Key`               | 401    |
+| auth not configured (no key set)  | 503    |
 | no model loaded                   | 503    |
 | internal inference failure        | 500 (no stack trace) |
 
@@ -134,9 +220,11 @@ Never accepted: `detector_score`, `detector_state`, `rules_version`,
 | ---------------------------- | ------------------------------------ | -------------------------------------------- |
 | `ANXIETYWATCH_MODEL_PATH`    | `models/prototype_v0.1.0.pkl`        | path to the trained bundle (`.pkl`)          |
 | `ANXIETYWATCH_REQUIRE_MODEL` | unset → `false` (dev)                | `true` ⇒ startup fails if artifact missing   |
+| `ANXIETYWATCH_API_KEY`       | unset                                | inference auth (`X-Api-Key`); unset ⇒ 503    |
 | `PORT`                       | `8000`                               | ASGI bind port (Container Apps sets `PORT`)  |
 
-`create_app(model_path=..., require_model=...)` overrides both in tests/code.
+`create_app(model_path=..., require_model=..., api_key=...)` overrides all
+three in tests/code.
 
 ## Deployment readiness — Docker / Azure Container Apps
 
@@ -158,6 +246,7 @@ it with a volume mount (or an Azure Container Apps mounted secret).
 docker run --rm -p 8000:8000 \
   -v "${PWD}/models:/app/models" \
   -e ANXIETYWATCH_MODEL_PATH=/app/models/prototype_v0.1.0.pkl \
+  -e ANXIETYWATCH_API_KEY="<set-your-key>" \
   anxietywatch-ml-api:dev
 ```
 
@@ -172,7 +261,8 @@ docker run --rm -p 8000:8000 \
   **exits at startup** if the configured artifact cannot be loaded — no
   degraded serving, no untrained fallback.
 - Health probe: `GET /health` (200 ready / 503 not ready).
-- Prediction endpoint: `POST /predict` (contract above).
+- Prediction endpoints: `POST /predict` and `POST /predict/window` (contracts
+  above), both behind `X-Api-Key` (`ANXIETYWATCH_API_KEY`).
 - CPU inference only; min replicas may be `0` (container starts fast, no GPU,
   no external services required).
 - No Azure SDK dependencies; the FastAPI app is cloud-provider-neutral.

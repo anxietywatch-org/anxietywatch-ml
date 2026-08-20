@@ -35,6 +35,9 @@ VALID_FEATURES = {
     "sample_count": 61,
 }
 
+TEST_API_KEY = "test-api-key-007-b1"
+AUTH_HEADERS = {"X-Api-Key": TEST_API_KEY}
+
 
 @pytest.fixture(scope="module")
 def bundle_path(tmp_path_factory):
@@ -51,7 +54,7 @@ def predictor(bundle_path):
 
 @pytest.fixture(scope="module")
 def client(bundle_path):
-    return TestClient(create_app(str(bundle_path)))
+    return TestClient(create_app(str(bundle_path), api_key=TEST_API_KEY))
 
 
 @pytest.fixture(scope="module")
@@ -85,35 +88,62 @@ class TestHealth:
         assert "Traceback" not in response.text
 
     def test_missing_model_predict_503(self):
-        client = TestClient(create_app("nonexistent_bundle.pkl"))
-        assert client.post("/predict", json=VALID_FEATURES).status_code == 503
+        client = TestClient(create_app("nonexistent_bundle.pkl", api_key=TEST_API_KEY))
+        assert client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).status_code == 503
+
+
+class TestAuthentication:
+    def test_predict_requires_api_key(self, client):
+        assert client.post("/predict", json=VALID_FEATURES).status_code == 401
+
+    def test_predict_rejects_wrong_api_key(self, client):
+        response = client.post(
+            "/predict", json=VALID_FEATURES, headers={"X-Api-Key": "wrong-key"}
+        )
+        assert response.status_code == 401
+        assert "wrong-key" not in response.text
+        assert TEST_API_KEY not in response.text
+
+    def test_predict_missing_header_detail(self, client):
+        body = client.post("/predict", json=VALID_FEATURES).json()
+        assert body["detail"] == "missing API key"
+
+    def test_health_does_not_require_api_key(self, client):
+        assert client.get("/health").status_code == 200
+
+    def test_unconfigured_key_rejects_everything(self, monkeypatch):
+        monkeypatch.delenv("ANXIETYWATCH_API_KEY", raising=False)
+        client = TestClient(create_app("nonexistent_bundle.pkl", api_key=None))
+        response = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS)
+        assert response.status_code == 503
+        assert response.json()["detail"] == "inference authentication is not configured"
 
 
 class TestPredictEndpoint:
     def test_predict_returns_200(self, client):
-        assert client.post("/predict", json=VALID_FEATURES).status_code == 200
+        assert client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).status_code == 200
 
     def test_prediction_is_binary(self, client):
-        body = client.post("/predict", json=VALID_FEATURES).json()
+        body = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).json()
         assert body["prediction"] in (0, 1)
 
     def test_probability_in_range(self, client):
-        body = client.post("/predict", json=VALID_FEATURES).json()
+        body = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).json()
         assert 0.0 <= body["support_probability"] <= 1.0
 
     def test_threshold_correct(self, client, expected_metadata):
-        body = client.post("/predict", json=VALID_FEATURES).json()
+        body = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).json()
         assert body["threshold"] == expected_metadata["threshold"]
         assert body["threshold"] == pytest.approx(expected_metadata["threshold"])
 
     def test_model_version_correct(self, client):
-        body = client.post("/predict", json=VALID_FEATURES).json()
+        body = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).json()
         assert body["model_version"] == "0.1.0"
         assert body["target"] == "target_support_requested"
 
     def test_same_payload_same_prediction(self, client):
-        first = client.post("/predict", json=VALID_FEATURES).json()
-        second = client.post("/predict", json=VALID_FEATURES).json()
+        first = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).json()
+        second = client.post("/predict", json=VALID_FEATURES, headers=AUTH_HEADERS).json()
         assert first == second
 
     def test_nan_missing_sensor_supported(self, client):
@@ -121,19 +151,19 @@ class TestPredictEndpoint:
         payload["hrv_rmssd"] = None
         payload["hrv_sdnn"] = None
         payload["ibi_available"] = None
-        response = client.post("/predict", json=payload)
+        response = client.post("/predict", json=payload, headers=AUTH_HEADERS)
         assert response.status_code == 200
         assert response.json()["prediction"] in (0, 1)
 
     def test_invalid_feature_422(self, client):
         payload = dict(VALID_FEATURES)
         payload["detector_score"] = 0.62
-        assert client.post("/predict", json=payload).status_code == 422
+        assert client.post("/predict", json=payload, headers=AUTH_HEADERS).status_code == 422
 
     def test_non_numeric_value_422(self, client):
         payload = dict(VALID_FEATURES)
         payload["hr_mean"] = "not-a-number"
-        assert client.post("/predict", json=payload).status_code == 422
+        assert client.post("/predict", json=payload, headers=AUTH_HEADERS).status_code == 422
 
 
 class TestNonFiniteInputRejection:
@@ -145,7 +175,9 @@ class TestNonFiniteInputRejection:
         payload[feature] = "Infinity"
         raw = json.dumps(payload).replace('"Infinity"', "Infinity")
         response = client.post(
-            "/predict", content=raw, headers={"Content-Type": "application/json"}
+            "/predict",
+            content=raw,
+            headers={**AUTH_HEADERS, "Content-Type": "application/json"},
         )
         assert response.status_code == 400
 
@@ -155,7 +187,9 @@ class TestNonFiniteInputRejection:
         payload[feature] = "-Infinity"
         raw = json.dumps(payload).replace('"-Infinity"', "-Infinity")
         response = client.post(
-            "/predict", content=raw, headers={"Content-Type": "application/json"}
+            "/predict",
+            content=raw,
+            headers={**AUTH_HEADERS, "Content-Type": "application/json"},
         )
         assert response.status_code == 400
 
@@ -164,7 +198,9 @@ class TestNonFiniteInputRejection:
         payload["hr_mean"] = "NaN"
         raw = json.dumps(payload).replace('"NaN"', "NaN")
         response = client.post(
-            "/predict", content=raw, headers={"Content-Type": "application/json"}
+            "/predict",
+            content=raw,
+            headers={**AUTH_HEADERS, "Content-Type": "application/json"},
         )
         assert response.status_code == 200
         assert response.json()["prediction"] in (0, 1)
