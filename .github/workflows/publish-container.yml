@@ -10,6 +10,21 @@
 # moving `develop` tag for reference, but Azure deployments ALWAYS use the
 # immutable full-SHA tag (github.sha) — never `latest` and never `develop`.
 #
+# Effective ordering for a push to develop:
+#
+#   quality-gate (ruff + compileall + pytest for the SAME github.sha)
+#        ↓ PASS
+#   build-and-publish (Docker build + GHCR publish :<full SHA>)
+#        ↓
+#   deploy-azure (OIDC login -> image-only update -> revision wait ->
+#                 /health verification)
+#
+# If quality-gate fails, neither the image is published nor Azure is touched.
+# The authoritative quality commands are duplicated here (rather than relying
+# on the separate ci.yml workflow) so that deployment is impossible unless the
+# tests for the deployed commit passed. A later task may refactor this into a
+# reusable workflow/action.
+#
 # Azure authentication uses GitHub OIDC (federated credential on
 # sp-anxietywatch-github-dev). No client secret and no credential files are used.
 
@@ -35,10 +50,42 @@ env:
   IMAGE_NAME: ghcr.io/anxietywatch-org/anxietywatch-ml-api
 
 jobs:
+  quality-gate:
+    name: Quality + Test (deployment gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install project + dev dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff quality gate (clean subset)
+        run: python -m ruff check src tests --config .ruff-ci.toml
+
+      - name: Package import smoke
+        run: python -m compileall -q src
+
+      - name: Tests
+        run: python -m pytest tests/ -q
+
   build-and-publish:
     name: Build (+ Publish) image
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: quality-gate
     permissions:
       contents: read
       packages: write
@@ -168,7 +215,8 @@ jobs:
           fi
           STABLE_FQDN="$(jq -r '.properties.configuration.ingress.fqdn // ""' <<<"${APP}")"
           if [ -z "${STABLE_FQDN}" ]; then
-            STABLE_FQDN="ca-anxietywatch-ml-api-dev.grayrock-ac119a47.centralus.azurecontainerapps.io"
+            echo "::error::Stable ingress FQDN missing from Container App resource (properties.configuration.ingress.fqdn is empty). Refusing to health-check a fallback URL."
+            exit 1
           fi
           echo "revision=${NEW_REV}" >> "${GITHUB_OUTPUT}"
           echo "fqdn=${STABLE_FQDN}" >> "${GITHUB_OUTPUT}"
