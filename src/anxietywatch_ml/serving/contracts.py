@@ -8,9 +8,13 @@ identity metadata are NOT part of the request: ``extra="forbid"`` rejects
 silently leaking them into ``X``.
 """
 
+from datetime import datetime
 from typing import Literal, Optional
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from anxietywatch_ml.contracts.telemetry import TelemetrySample
 
 FEATURE_SCHEMA = [
     "hr_mean",
@@ -65,6 +69,29 @@ class PredictRequest(BaseModel):
     valid_sample_ratio: Optional[float] = None
     window_duration_seconds: Optional[float] = None
     sample_count: Optional[float] = None
+
+
+class PredictWindowRequest(BaseModel):
+    """Inference request: a raw telemetry window anchored to a detector event.
+
+    The ML service owns windowing: samples are flattened, sorted by timestamp,
+    trimmed to ``[detectedAt - 60s, detectedAt]`` and cleaned exactly like the
+    training/ground-truth path before the 16 features are computed.
+
+    Transport uses camelCase (mirrors the backend). ``samples`` may cover
+    several backend batches; there is intentionally no ``batchId`` here.
+    ``userId`` is optional: it is not required for correct windowing and should
+    only be sent when identity scoping is genuinely needed.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    event_id: UUID = Field(alias="eventId")
+    device_id: UUID = Field(alias="deviceId")
+    session_id: UUID = Field(alias="sessionId")
+    detected_at: datetime = Field(alias="detectedAt")
+    user_id: Optional[UUID] = Field(default=None, alias="userId")
+    samples: list[TelemetrySample] = Field(min_length=1)
 
 
 class PredictResponse(BaseModel):
