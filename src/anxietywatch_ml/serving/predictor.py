@@ -6,6 +6,8 @@ pipeline (never duplicated, never refit), extracts the positive-class
 probability and applies the threshold that came from training metadata.
 """
 
+import math
+
 import pandas as pd
 
 from anxietywatch_ml.pipelines.model_pipeline import (
@@ -81,6 +83,15 @@ class GroundTruthPredictor:
                 f"feature schema violation: unexpected features {extra} "
                 "(detector/identity metadata is never accepted)"
             )
+        for name in self.feature_names:
+            value = features.get(name)
+            if value is None or isinstance(value, bool):
+                continue
+            if isinstance(value, float) and not math.isnan(value) and not math.isfinite(value):
+                raise PredictorError(
+                    f"feature schema violation: '{name}' must be finite; "
+                    "infinite values are rejected"
+                )
 
     def _build_frame(self, features: dict) -> pd.DataFrame:
         self.validate_features(features)
