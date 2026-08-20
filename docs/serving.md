@@ -177,6 +177,62 @@ docker run --rm -p 8000:8000 \
   no external services required).
 - No Azure SDK dependencies; the FastAPI app is cloud-provider-neutral.
 
+## GitHub Container Registry (GHCR) publishing
+
+The inference image is published **by GitHub Actions** (never from a developer
+workstation) to:
+
+```
+ghcr.io/anxietywatch-org/anxietywatch-ml-api
+```
+
+**Workflow:** `.github/workflows/publish-container.yml`
+
+**Triggers**
+
+- **Manual** (`workflow_dispatch`): run from the Actions UI selecting the
+  `develop` ref to publish an explicit Azure candidate.
+- **Push to `develop`**: publishes the integrated image automatically.
+- **Pull requests**: only build the image to validate it; they **never** push
+  to GHCR.
+
+**Tags**
+
+Every publish carries immutable Git-SHA tags:
+
+- `ghcr.io/anxietywatch-org/anxietywatch-ml-api:<full-sha>` (40 chars)
+- `ghcr.io/anxietywatch-org/anxietywatch-ml-api:<short-sha>` (12 chars)
+
+A push to `develop` additionally publishes the moving tag:
+
+- `ghcr.io/anxietywatch-org/anxietywatch-ml-api:develop`
+
+Deployment does not rely on `latest`; Azure Container Apps must be pinned to an
+immutable SHA tag. OCI labels include `org.opencontainers.image.source`
+(repository) and `org.opencontainers.image.revision` (Git commit SHA).
+
+**Authentication:** the repo-scoped `GITHUB_TOKEN` is used with
+`docker/login-action`; no personal access token is created or required.
+
+**The model artifact is NOT inside the image.** The published container
+contains only the inference application and its runtime dependencies. The
+trained bundle (`models/*.pkl`) is excluded by `.dockerignore` (see above) and
+must be mounted separately at runtime. No credentials and no `.env` files are
+included.
+
+**Pull for local verification**
+
+```bash
+docker pull ghcr.io/anxietywatch-org/anxietywatch-ml-api:develop
+docker run --rm -p 8000:8000 \
+  -v "${PWD}/models:/app/models" \
+  -e ANXIETYWATCH_MODEL_PATH=/app/models/prototype_v0.1.0.pkl \
+  ghcr.io/anxietywatch-org/anxietywatch-ml-api:develop
+```
+
+> Pulling anonymously requires the GHCR package to be public; otherwise
+> `docker login ghcr.io` with a GitHub token is needed first.
+
 ## Local startup
 
 ```powershell
