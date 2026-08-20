@@ -108,8 +108,14 @@ Never accepted: `detector_score`, `detector_state`, `rules_version`,
 { "status": "ok", "model_loaded": true, "model_version": "0.1.0" }
 ```
 
-If no valid artifact is available: `status="degraded"`, `model_loaded=false`,
-and `/predict` returns `503`.
+- Model loaded: `200 OK` with the body above.
+- No valid artifact: `503` with `{ "status": "degraded", "model_loaded": false,
+  "model_version": "unknown" }`. The body is stable and never leaks filesystem
+  paths or internal exception details.
+- In production (`ANXIETYWATCH_REQUIRE_MODEL=true`) startup fails fast instead
+  of serving a degraded process, so the degraded branch is effectively dev-only.
+- Suitable for an Azure Container Apps HTTP probe: non-2xx when the model is
+  not available for inference.
 
 ## Errors
 
@@ -118,8 +124,114 @@ and `/predict` returns `503`.
 | missing required feature          | 400/422 |
 | extra/prohibited (leakage) key    | 422    |
 | non-numeric value                 | 422    |
+| non-finite (`Infinity`) value     | 400    |
 | no model loaded                   | 503    |
 | internal inference failure        | 500 (no stack trace) |
+
+## Configuration / environment variables
+
+| variable                     | default                              | purpose                                      |
+| ---------------------------- | ------------------------------------ | -------------------------------------------- |
+| `ANXIETYWATCH_MODEL_PATH`    | `models/prototype_v0.1.0.pkl`        | path to the trained bundle (`.pkl`)          |
+| `ANXIETYWATCH_REQUIRE_MODEL` | unset → `false` (dev)                | `true` ⇒ startup fails if artifact missing   |
+| `PORT`                       | `8000`                               | ASGI bind port (Container Apps sets `PORT`)  |
+
+`create_app(model_path=..., require_model=...)` overrides both in tests/code.
+
+## Deployment readiness — Docker / Azure Container Apps
+
+> Azure resources are NOT provisioned by this repository. This section only
+> documents how to run the service as a container.
+
+**Build**
+
+```bash
+docker build -t anxietywatch-ml-api:dev .
+```
+
+The trained bundle is a **runtime input**, never baked into the image: supply
+it with a volume mount (or an Azure Container Apps mounted secret).
+
+**Run locally**
+
+```bash
+docker run --rm -p 8000:8000 \
+  -v "${PWD}/models:/app/models" \
+  -e ANXIETYWATCH_MODEL_PATH=/app/models/prototype_v0.1.0.pkl \
+  anxietywatch-ml-api:dev
+```
+
+**Behavior**
+
+- Container runs as a non-root user on `python:3.12-slim`.
+- Binds `0.0.0.0:${PORT:-8000}`; Container Apps maps public HTTPS ingress to
+  this target port.
+- ASGI command: `uvicorn anxietywatch_ml.serving.app:app --host 0.0.0.0
+  --port ${PORT:-8000} --workers 1`.
+- With `ANXIETYWATCH_REQUIRE_MODEL=true` (default in the image), the process
+  **exits at startup** if the configured artifact cannot be loaded — no
+  degraded serving, no untrained fallback.
+- Health probe: `GET /health` (200 ready / 503 not ready).
+- Prediction endpoint: `POST /predict` (contract above).
+- CPU inference only; min replicas may be `0` (container starts fast, no GPU,
+  no external services required).
+- No Azure SDK dependencies; the FastAPI app is cloud-provider-neutral.
+
+## GitHub Container Registry (GHCR) publishing
+
+The inference image is published **by GitHub Actions** (never from a developer
+workstation) to:
+
+```
+ghcr.io/anxietywatch-org/anxietywatch-ml-api
+```
+
+**Workflow:** `.github/workflows/publish-container.yml`
+
+**Triggers**
+
+- **Manual** (`workflow_dispatch`): run from the Actions UI selecting the
+  `develop` ref to publish an explicit Azure candidate.
+- **Push to `develop`**: publishes the integrated image automatically.
+- **Pull requests**: only build the image to validate it; they **never** push
+  to GHCR.
+
+**Tags**
+
+Every publish carries immutable Git-SHA tags:
+
+- `ghcr.io/anxietywatch-org/anxietywatch-ml-api:<full-sha>` (40 chars)
+- `ghcr.io/anxietywatch-org/anxietywatch-ml-api:<short-sha>` (12 chars)
+
+A push to `develop` additionally publishes the moving tag:
+
+- `ghcr.io/anxietywatch-org/anxietywatch-ml-api:develop`
+
+Deployment does not rely on `latest`; Azure Container Apps must be pinned to an
+immutable SHA tag. OCI labels include `org.opencontainers.image.source`
+(repository) and `org.opencontainers.image.revision` (Git commit SHA).
+
+**Authentication:** the repo-scoped `GITHUB_TOKEN` is used with
+`docker/login-action`; no personal access token is created or required.
+
+**The model artifact is NOT inside the image.** The published container
+contains only the inference application and its runtime dependencies. The
+trained bundle (`models/*.pkl`) is excluded by `.dockerignore` (see above) and
+must be mounted separately at runtime. No credentials and no `.env` files are
+included.
+
+**Pull for local verification**
+
+```bash
+docker pull ghcr.io/anxietywatch-org/anxietywatch-ml-api:develop
+docker run --rm -p 8000:8000 \
+  -v "${PWD}/models:/app/models" \
+  -e ANXIETYWATCH_MODEL_PATH=/app/models/prototype_v0.1.0.pkl \
+  ghcr.io/anxietywatch-org/anxietywatch-ml-api:develop
+```
+
+> Pulling anonymously requires the GHCR package to be public; otherwise
+> `docker login ghcr.io` with a GitHub token is needed first.
 
 ## Local startup
 

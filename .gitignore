@@ -40,9 +40,12 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# ML artifacts (if any)
+# ML artifacts (if any) — precise patterns to avoid hiding source packages
 *.pkl
 *.joblib
 *.onnx
-/models/
-/data/
+/models/*.pkl
+/models/*.joblib
+/models/*.onnx
+# /data/ intentionally omitted: src/anxietywatch_ml/data/ is a source package
+# If generated data appears, use: /data/generated/
