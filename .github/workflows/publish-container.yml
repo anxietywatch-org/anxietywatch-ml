@@ -179,7 +179,7 @@ jobs:
           az rest --method patch \
             --url "${BASE}?api-version=2024-10-02-preview" \
             --body @/tmp/app-patch.json \
-            --headers "Content-Type=application/merge-patch+json" \
+            --headers "Content-Type=application/json" \
             -o json > /tmp/app-after.json
           echo "PATCH accepted (template-only, application secrets untouched)."
 
