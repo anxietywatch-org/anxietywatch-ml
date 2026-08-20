@@ -1,4 +1,6 @@
-"""Tests for the prototype inference service (005-A)."""
+"""Tests for the prototype inference service (005-A / 006-A container-ready)."""
+
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -69,9 +71,18 @@ class TestHealth:
 
     def test_missing_model_health_not_loaded(self):
         client = TestClient(create_app("nonexistent_bundle.pkl"))
-        body = client.get("/health").json()
+        response = client.get("/health")
+        assert response.status_code == 503
+        body = response.json()
         assert body["model_loaded"] is False
         assert body["status"] == "degraded"
+
+    def test_degraded_health_does_not_leak_paths_or_exceptions(self):
+        client = TestClient(create_app("nonexistent_bundle.pkl"))
+        response = client.get("/health")
+        assert response.status_code == 503
+        assert "nonexistent_bundle.pkl" not in response.text
+        assert "Traceback" not in response.text
 
     def test_missing_model_predict_503(self):
         client = TestClient(create_app("nonexistent_bundle.pkl"))
@@ -123,6 +134,68 @@ class TestPredictEndpoint:
         payload = dict(VALID_FEATURES)
         payload["hr_mean"] = "not-a-number"
         assert client.post("/predict", json=payload).status_code == 422
+
+
+class TestNonFiniteInputRejection:
+    @pytest.mark.parametrize("feature", ["hr_mean", "hr_std", "hrv_rmssd"])
+    def test_positive_infinity_rejected(self, client, feature):
+        # Raw JSON with an `Infinity` literal: not strict JSON, but Python's
+        # json.loads accepts it, so the server must reject it explicitly.
+        payload = dict(VALID_FEATURES)
+        payload[feature] = "Infinity"
+        raw = json.dumps(payload).replace('"Infinity"', "Infinity")
+        response = client.post(
+            "/predict", content=raw, headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize("feature", ["hr_mean", "skin_temp_mean"])
+    def test_negative_infinity_rejected(self, client, feature):
+        payload = dict(VALID_FEATURES)
+        payload[feature] = "-Infinity"
+        raw = json.dumps(payload).replace('"-Infinity"', "-Infinity")
+        response = client.post(
+            "/predict", content=raw, headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 400
+
+    def test_nan_still_supported_as_semantic_missing(self, client):
+        payload = dict(VALID_FEATURES)
+        payload["hr_mean"] = "NaN"
+        raw = json.dumps(payload).replace('"NaN"', "NaN")
+        response = client.post(
+            "/predict", content=raw, headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 200
+        assert response.json()["prediction"] in (0, 1)
+
+
+class TestRequiredModelStartup:
+    def test_missing_artifact_with_require_model_raises(self):
+        with pytest.raises(RuntimeError):
+            create_app("nonexistent_bundle.pkl", require_model=True)
+
+    def test_corrupt_artifact_with_require_model_raises(self, tmp_path):
+        bad = tmp_path / "bad.pkl"
+        bad.write_bytes(b"not a valid anxietywatch artifact")
+        with pytest.raises(RuntimeError):
+            create_app(str(bad), require_model=True)
+
+    def test_valid_artifact_with_require_model_starts_ok(self, bundle_path):
+        client = TestClient(create_app(str(bundle_path), require_model=True))
+        body = client.get("/health").json()
+        assert body["status"] == "ok"
+        assert body["model_loaded"] is True
+
+    def test_require_model_from_environment_flag(self, monkeypatch):
+        monkeypatch.setenv("ANXIETYWATCH_REQUIRE_MODEL", "1")
+        with pytest.raises(RuntimeError):
+            create_app("nonexistent_bundle.pkl")
+
+    def test_require_model_env_disabled_starts_degraded(self, monkeypatch):
+        monkeypatch.setenv("ANXIETYWATCH_REQUIRE_MODEL", "false")
+        client = TestClient(create_app("nonexistent_bundle.pkl"))
+        assert client.get("/health").status_code == 503
 
 
 class TestPredictorInternals:

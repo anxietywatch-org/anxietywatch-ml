@@ -1,0 +1,40 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Local secrets / environment
+.env
+.env.*
+!.env.example
+
+# Python build artifacts & virtualenvs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / tool caches
+tests/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Documentation / ops scripts (not needed at runtime)
+docs/
+CONTRIBUTING.md
+apply-branch-protection.ps1
+apply-branch-protection.sh
+
+# ML artifacts are deployment-time inputs, never baked into the image
+models/
+*.pkl
+*.joblib
+*.onnx
+bootstrap-test.pkl
