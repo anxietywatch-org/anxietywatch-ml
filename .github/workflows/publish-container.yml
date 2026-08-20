@@ -16,9 +16,13 @@
 #        ↓ PASS
 #   build-and-publish (Docker build + GHCR publish :<full SHA>)
 #        ↓
-#   deploy-azure (OIDC login -> image-only update -> revision wait ->
-#                 /health verification)
+#   deploy-azure (OIDC login -> template-only image update -> revision wait ->
+#                 /health verification -> secret-reference verification)
 #
+# The Azure deploy (006-C-HOTFIX) is a JSON Merge Patch carrying ONLY
+# .properties.template (image swapped); .properties.configuration — including
+# application secrets like ml-api-key — is never round-tripped, so app secrets
+# survive image-only deployments. See scripts/cd-image-patch.sh.
 # If quality-gate fails, neither the image is published nor Azure is touched.
 # The authoritative quality commands are duplicated here (rather than relying
 # on the separate ci.yml workflow) so that deployment is impossible unless the
@@ -141,6 +145,9 @@ jobs:
       AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       IMAGE_REF: ghcr.io/anxietywatch-org/anxietywatch-ml-api:${{ github.sha }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
       - name: Azure login (OIDC)
         uses: azure/login@v3
         with:
@@ -152,27 +159,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The containerapp CLI extension's default preview API (2025-10-02-preview)
-          # caused a server-side 400 on containerApps writes during 006-B2.
-          # az rest with the proven api-version=2024-10-02-preview avoids that defect.
-          # We GET the existing definition and PATCH it back with ONLY the image
-          # changed, preserving all existing configuration (env vars, volume mount,
-          # probes, ingress, scale, read-only mount).
+          # 006-C-HOTFIX: never round-trip application secrets.
+          # The previous PATCH echoed the whole GET representation back, including
+          # .properties.configuration where Azure lists application secrets as bare
+          # metadata ({"name": "ml-api-key"}) WITHOUT a value or keyVaultUrl+identity.
+          # Azure rejected that with ContainerAppSecretInvalid. The secret itself is
+          # valid - the PATCH was the bug. We now PATCH a JSON Merge Patch carrying
+          # ONLY .properties.template (the complete, unchanged revision template with
+          # exactly the image swapped), so .properties.configuration (incl. secrets)
+          # is never sent and stays untouched in Azure. The transformation and its
+          # defensive assertions live in scripts/cd-image-patch.sh, which
+          # scripts/test-cd-image-patch.sh exercises against a sanitized fixture.
+          # Keep the proven api-version=2024-10-02-preview: the containerapp CLI
+          # extension's default preview API caused a server-side 400 during 006-B2.
           SUB="$(az account show --query id -o tsv)"
           BASE="https://management.azure.com/subscriptions/${SUB}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${AZURE_CONTAINER_APP_NAME}"
           az rest --method get --url "${BASE}?api-version=2024-10-02-preview" -o json > /tmp/app.json
-          jq '
-            del(.id, .name, .type, .systemData) |
-            .properties |= del(.provisioningState, .latestRevisionName, .latestRevisionFqdn,
-                               .latestReadyRevisionName, .customDomainVerificationId,
-                               .eventStreamEndpoint, .outboundIPAddresses, .deploymentErrors,
-                               .runningStatus, .runningState) |
-            .properties.configuration.ingress |= del(.fqdn) |
-            .tags = (.tags // {}) |
-            .properties.template.containers[0].image = $img
-          ' --arg img "${IMAGE_REF}" /tmp/app.json > /tmp/app-patch.json
-          az rest --method patch --url "${BASE}?api-version=2024-10-02-preview" --body @/tmp/app-patch.json -o json > /tmp/app-after.json
-          echo "PATCH accepted."
+          bash scripts/cd-image-patch.sh "${IMAGE_REF}" /tmp/app.json /tmp/app-patch.json
+          az rest --method patch \
+            --url "${BASE}?api-version=2024-10-02-preview" \
+            --body @/tmp/app-patch.json \
+            --headers "Content-Type=application/merge-patch+json" \
+            -o json > /tmp/app-after.json
+          echo "PATCH accepted (template-only, application secrets untouched)."
 
       - name: Wait for new revision and verify image
         id: verify
@@ -248,6 +257,27 @@ jobs:
             exit 1
           fi
 
+      - name: Verify application secret configuration survived deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUB="$(az account show --query id -o tsv)"
+          BASE="https://management.azure.com/subscriptions/${SUB}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.App/containerApps/${AZURE_CONTAINER_APP_NAME}"
+          APP="$(az rest --method get --url "${BASE}?api-version=2024-10-02-preview" -o json)"
+          # Env must still reference the secret by NAME. The value is never retrieved.
+          SECRET_REF="$(jq -r '.properties.template.containers[0].env[] | select(.name == "ANXIETYWATCH_API_KEY") | .secretRef // ""' <<<"${APP}")"
+          if [ "${SECRET_REF}" != "ml-api-key" ]; then
+            echo "::error::ANXIETYWATCH_API_KEY env reference lost after deployment (secretRef=${SECRET_REF:-<missing>})"
+            exit 1
+          fi
+          echo "ANXIETYWATCH_API_KEY -> secretref:ml-api-key preserved."
+          # Application secret NAME must still exist (name-only check, value never resolved).
+          if ! jq -e '.properties.configuration.secrets // [] | any(.name == "ml-api-key")' <<<"${APP}" >/dev/null; then
+            echo "::error::Application secret ml-api-key missing after deployment"
+            exit 1
+          fi
+          echo "Application secret ml-api-key present (name-only check)."
+
       - name: Write deployment summary
         shell: bash
         run: |
@@ -260,4 +290,5 @@ jobs:
             echo "- **Revision**: \`${{ steps.verify.outputs.revision }}\`"
             echo "- **Stable FQDN**: https://${{ steps.verify.outputs.fqdn }}"
             echo "- **Health verification**: PASS"
+            echo "- **Secret preservation**: PASS (ANXIETYWATCH_API_KEY -> secretref:ml-api-key, ml-api-key present)"
           } >> "${GITHUB_STEP_SUMMARY}"
