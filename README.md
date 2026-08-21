@@ -13,10 +13,22 @@ This repository contains the Machine Learning pipeline for AnxietyWatch. It serv
 ### Data Flow (IMPLEMENTED)
 
 ```
-Galaxy Watch → Wear Data Layer → Mobile Fog Node → Backend API → MongoDB → ML Inference
-                                                          ↓
-                    Validation → Preprocessing → Features → Model → Prediction
+Galaxy Watch → Wear Data Layer → Mobile Fog Node → Backend API
+                                                          ├──→ MongoDB
+                                                          │      (telemetry persistence / query)
+                                                          │
+                                                          └──→ raw event window over HTTPS
+                                                                     ↓
+                                                               ML API
+                                                                     ↓
+                                                          canonical preprocessing
+                                                                     ↓
+                                                              features
+                                                                     ↓
+                                                               model
 ```
+
+**ML NEVER reads Backend Mongo directly.** Backend owns persistence/query and sends the raw event window to ML over HTTPS.
 
 ### What This Pipeline DOES (IMPLEMENTED)
 
@@ -51,8 +63,10 @@ Galaxy Watch → Wear Data Layer → Mobile Fog Node → Backend API → MongoDB
 - ❌ Detect anxiety clinically
 - ❌ Use real patient data (only synthetic for training/validation)
 - ❌ Monitor drift or retrain automatically
-- ❌ Integrate with Azure/cloud infrastructure (ML side — deployment is implemented)
+- ❌ Real-data-trained successor model
+- ❌ Drift/performance monitoring
 - ❌ Automatic online learning
+- ❌ Durable inference reconciliation
 
 ### REJECTED ARCHITECTURE (Explicitly NOT Done)
 
