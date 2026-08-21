@@ -1,39 +1,70 @@
 # AnxietyWatch ML
 
-**Machine Learning component for AnxietyWatch — MVP Bootstrap / Data Pipeline**
+**Machine Learning component for AnxietyWatch — Technical MVP Complete**
 
-> ⚠️ **Current Status: ML MVP — bootstrap / data pipeline**
+> **Current Status: Technical ML MVP — COMPLETE**
 >
 > This is **NOT** a clinical anxiety detector. The models in this repository are **infrastructure baselines** used solely to validate the ML plumbing (data contracts, preprocessing, feature engineering, training, prediction). They have no clinical validity.
 
 ## Overview
 
-This repository contains the Machine Learning pipeline for AnxietyWatch. It consumes wearable telemetry (heart rate, IBI, accelerometer magnitude, skin temperature) from the AnxietyWatch backend and produces technical signals for downstream product logic.
+This repository contains the Machine Learning pipeline for AnxietyWatch. It serves canonical preprocessing/feature extraction and inference for event-anchored raw telemetry windows.
 
-### Data Flow
+### Data Flow (IMPLEMENTED)
 
 ```
-Galaxy Watch → Wear Data Layer → Mobile Fog Node → Backend API → MongoDB → ML Pipeline
-                                                                ↓
-                                              Validation → Preprocessing → Features → Model → Prediction
+Galaxy Watch → Wear Data Layer → Mobile Fog Node → Backend API → MongoDB → ML Inference
+                                                          ↓
+                    Validation → Preprocessing → Features → Model → Prediction
 ```
 
-### What This Pipeline Does
+### What This Pipeline DOES (IMPLEMENTED)
 
 - ✅ Validates incoming telemetry against the internal ML contract
-- ✅ Preprocesses and windows time-series data
-- ✅ Engineers features from available signals (HR, HRV, temperature, quality)
+- ✅ Preprocesses and windows time-series data (event-anchored raw windows)
+- ✅ Engineers features from available signals (HR, HRV, temperature, quality) — **ML-owned canonical preprocessing**
 - ✅ Trains baseline models (DummyClassifier, LogisticRegression) on synthetic data
 - ✅ Evaluates with standard metrics (accuracy, precision, recall, F1, ROC-AUC)
 - ✅ Provides reproducible, configurable pipeline with CLI
+- ✅ **Serves model v0.1.0 via FastAPI**
+- ✅ **GET /health** — health check with `model_loaded=true`, `model_version=0.1.0`
+- ✅ **POST /predict** — single-sample inference (authenticated)
+- ✅ **POST /predict/window** — event-window inference (authenticated, X-Api-Key)
+- ✅ **Canonical event-anchored raw telemetry serving** — ML owns preprocessing/features
+- ✅ **Training-serving parity** — bundle config derives feature spec for both training and inference
+- ✅ **API-key authentication** — X-Api-Key header, HTTPS-only
+- ✅ **Docker** — multi-stage build, non-root user
+- ✅ **GHCR** — published to `ghcr.io/anxietywatch-org/anxietywatch-ml-api`
+- ✅ **Azure Container Apps** — production-ready deployment target
+- ✅ **Azure Files artifact mount** — model bundle loaded from persistent storage
+- ✅ **GitHub OIDC/CD** — secret-safe image-only deployments (no secret round-trip)
+- ✅ **Backend multi-batch window retrieval** — `[detectedAt-60s, detectedAt]` across batches
+- ✅ **Backend secure ML HTTP client** — typed `AddHttpClient`, timeout/retries/failure classification
+- ✅ **Suspected-event inference orchestration** — B4 integration
+- ✅ **EventInferences persistence** — `event_inferences` collection, `eventId` keyed
+- ✅ **EventId idempotency** — duplicate suspected events never re-trigger ML
+- ✅ **Decision linkage** — `/events/decision` with same `eventId` for supervised labels
+- ✅ **Real Backend → Real Azure ML isolated E2E acceptance** — 2 telemetry batches → suspected event → Azure ML → EventInferenceResult → decision with same eventId
 
 ### What This Pipeline Does NOT Do (Yet)
 
 - ❌ Detect anxiety clinically
-- ❌ Use real patient data (only synthetic for now)
-- ❌ Deploy to production
+- ❌ Use real patient data (only synthetic for training/validation)
 - ❌ Monitor drift or retrain automatically
-- ❌ Integrate with Azure/cloud infrastructure
+- ❌ Integrate with Azure/cloud infrastructure (ML side — deployment is implemented)
+- ❌ Automatic online learning
+
+### REJECTED ARCHITECTURE (Explicitly NOT Done)
+
+> **ML does NOT connect directly to backend MongoDB.**
+>
+> That architecture was intentionally rejected. Current boundary:
+> - **Backend owns persistence/query** → sends raw event window
+> - **ML owns preprocessing/features/inference**
+
+### Watch-Computed Features — NOT Model Input
+
+Watch-computed `DerivedFeatures`/`Baseline` may be transmitted for **audit/parity** only. They are **NOT** the model's canonical inference features. ML calculates its own 16-feature vector from **RAW telemetry**.
 
 ## Installation
 
@@ -163,7 +194,7 @@ All development uses synthetic data that matches the **real backend contract**. 
 ### 3. Only Available Signals
 Features are computed ONLY from signals actually present in the pipeline:
 - ✅ Heart rate (bpm)
-- ⚠️ IBI (partial - Samsung only)
+- ✅ IBI (partial - Samsung only)
 - ✅ Skin temperature (partial)
 - ❌ Raw accelerometer x/y/z (not transmitted)
 - ❌ Ambient temperature (not captured)
@@ -218,14 +249,34 @@ See `docs/data-discovery.md` for the complete analysis of real contracts found i
 - Mobile Fog Node (enrichment, transport)
 - anxietywatch-backend (API DTOs, validation, MongoDB)
 
-## Next Steps (Not Implemented)
+---
 
-1. **Real data adapter**: Connect to backend MongoDB `telemetry_batches` collection
-2. **Feature enrichment**: Advocate for watch/fog to export baseline HR, derived features, detection scores
-3. **Label acquisition**: Integrate user responses (ground truth) from watch
-4. **Model iteration**: Replace baseline with proper model once real labels available
-5. **Monitoring**: Add data drift detection, performance monitoring
-6. **Deployment**: Containerize, add API endpoint, integrate with product
+## NEXT STAGE (Immediate)
+
+1. **Real Wear/Fog contract correction** — Fix event routing (suspected/decision vs SOS), ensure telemetry-before-suspected ordering, durable outbox ACKs
+2. **Real-device validation** — Test with actual Galaxy Watch sensors, verify 60s window coverage
+3. **Real user-label collection** — Collect `ACTIVITY_CONFIRMED`, `USER_OK`, `SUPPORT_REQUESTED` decisions for supervised learning
+
+## FUTURE MODEL EVOLUTION
+
+4. Train next model from sufficient real labeled data
+5. Compare candidate vs incumbent before deployment (shadow/eval)
+6. Data/model drift and performance monitoring
+7. Durable inference reconciliation (pending-marker + re-drive)
+
+---
+
+## ⚠️ Non-Clinical Disclaimer
+
+**Model 0.1.0 is synthetic-data / academic MVP only.**
+
+- `prediction = 1` does **NOT** mean: anxiety detected, panic attack, crisis, SOS required.
+- It means the current model predicts greater propensity for **SUPPORT_REQUESTED**, conditioned on a detector-prompted suspected event.
+- `prediction = 0` does **NOT** mean: no anxiety, safe, all clear.
+- **No automatic SOS/caregiver action from ML prediction.** Product decisions belong to later work.
+- Do **NOT** describe this model as clinically validated.
+
+---
 
 ## License
 
