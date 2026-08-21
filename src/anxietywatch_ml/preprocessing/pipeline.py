@@ -64,11 +64,8 @@ class PreprocessingPipeline:
         # Step 2: Sort
         df = df.sort_values(["user_id", "session_id", "timestamp"]).reset_index(drop=True)
 
-        # Step 3: Handle missing values
-        df = self._handle_missing_values(df)
-
-        # Step 4: Detect outliers
-        df = self._detect_outliers(df)
+        # Steps 3-4: Handle missing values and detect outliers (canonical cleaning)
+        df = self.clean_window(df)
 
         # Step 5: Segment into windows
         windows, metadata = self._segment_windows(df)
@@ -89,22 +86,81 @@ class PreprocessingPipeline:
         rows = []
         for batch in batches:
             for sample in batch.samples:
-                row = {
-                    "batch_id": str(batch.batch_id),
-                    "user_id": str(batch.user_id) if batch.user_id else None,
-                    "device_id": str(batch.device_id),
-                    "session_id": str(batch.session_id),
-                    "sequence": batch.sequence,
-                    "timestamp": sample.timestamp,
-                    "heart_rate_bpm": sample.heart_rate_bpm,
-                    "ibi_ms": sample.ibi_ms,
-                    "skin_temperature_celsius": sample.skin_temperature_celsius,
-                    "quality_heart_rate": sample.quality.heart_rate.value,
-                    "quality_ibi": sample.quality.ibi.value,
-                    "quality_wearing_state": sample.quality.wearing_state.value,
-                }
-                rows.append(row)
+                rows.append(
+                    self._row_from_sample(
+                        batch_id=batch.batch_id,
+                        user_id=batch.user_id,
+                        device_id=batch.device_id,
+                        session_id=batch.session_id,
+                        sequence=batch.sequence,
+                        sample=sample,
+                    )
+                )
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _row_from_sample(
+        *,
+        batch_id,
+        user_id,
+        device_id,
+        session_id,
+        sequence,
+        sample: TelemetrySample,
+    ) -> dict:
+        """Build one flat row from a single sample (shared by all flatten paths)."""
+        return {
+            "batch_id": str(batch_id) if batch_id is not None else None,
+            "user_id": str(user_id) if user_id else None,
+            "device_id": str(device_id),
+            "session_id": str(session_id),
+            "sequence": sequence,
+            "timestamp": sample.timestamp,
+            "heart_rate_bpm": sample.heart_rate_bpm,
+            "ibi_ms": sample.ibi_ms,
+            "skin_temperature_celsius": sample.skin_temperature_celsius,
+            "quality_heart_rate": sample.quality.heart_rate.value,
+            "quality_ibi": sample.quality.ibi.value,
+            "quality_wearing_state": sample.quality.wearing_state.value,
+        }
+
+    def flatten_samples(
+        self,
+        samples: list[TelemetrySample],
+        *,
+        user_id=None,
+        device_id,
+        session_id,
+    ) -> pd.DataFrame:
+        """Flatten a raw list of telemetry samples into the canonical flat frame.
+
+        Used by the serving path (event-anchored raw window), where the caller
+        already scopes the samples to one device/session. Batch/sequence context
+        is not applicable (no backend batch boundaries), so ``batch_id`` and
+        ``sequence`` are ``None``/``0``.
+        """
+        rows = [
+            self._row_from_sample(
+                batch_id=None,
+                user_id=user_id,
+                device_id=device_id,
+                session_id=session_id,
+                sequence=0,
+                sample=sample,
+            )
+            for sample in samples
+        ]
+        return pd.DataFrame(rows)
+
+    def clean_window(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply canonical missing-value handling and HR outlier detection.
+
+        Public reusable abstraction shared by the training/ground-truth path
+        and the serving path, so both consume identical cleaning semantics.
+        """
+        df = self._handle_missing_values(df)
+        df = self._detect_outliers(df)
+        return df
 
     def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """Handle missing values in the DataFrame."""
@@ -244,10 +300,20 @@ class PreprocessingPipeline:
 
 
 def create_pipeline(config: dict) -> PreprocessingPipeline:
-    """Factory function to create preprocessing pipeline from config."""
+    """Factory function to create preprocessing pipeline from config.
+
+    Reads ``config["window"]`` (segmentation) and ``config["preprocessing"]``
+    (cleaning: ``max_gap_seconds``, ``hr_outlier_std``). Used by BOTH the
+    offline ground-truth builder and the serving raw-window processor so the
+    cleaning contract cannot diverge between training and inference.
+    """
+    window_cfg = config.get("window", {})
+    prep_cfg = config.get("preprocessing", {})
     prep_config = PreprocessingConfig(
-        window_size_seconds=config.get("window", {}).get("size_seconds", 60),
-        stride_seconds=config.get("window", {}).get("stride_seconds", 30),
-        min_samples_per_window=config.get("window", {}).get("min_samples_per_window", 10),
+        window_size_seconds=window_cfg.get("size_seconds", 60),
+        stride_seconds=window_cfg.get("stride_seconds", 30),
+        min_samples_per_window=window_cfg.get("min_samples_per_window", 10),
+        max_gap_seconds=prep_cfg.get("max_gap_seconds", 60.0),
+        hr_outlier_std=prep_cfg.get("hr_outlier_std", 3.0),
     )
     return PreprocessingPipeline(prep_config)

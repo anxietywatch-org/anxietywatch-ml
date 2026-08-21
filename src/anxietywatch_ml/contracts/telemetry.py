@@ -30,11 +30,17 @@ class WearingState(str, Enum):
 
 
 class TelemetrySampleQuality(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Per-channel signal quality for a single telemetry sample.
 
-    heart_rate: SignalQuality
-    ibi: SignalQuality
-    wearing_state: WearingState = WearingState.UNKNOWN
+    Aliases mirror the backend transport spellings (camelCase). Both
+    snake_case (internal/normalized) and camelCase (transport) are accepted.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    heart_rate: SignalQuality = Field(alias="heartRate")
+    ibi: SignalQuality = Field(alias="ibi")
+    wearing_state: WearingState = Field(default=WearingState.UNKNOWN, alias="wearingState")
 
 
 class TelemetrySample(BaseModel):
@@ -44,15 +50,18 @@ class TelemetrySample(BaseModel):
     Fields matching the backend TelemetrySampleRequest.
     Accelerometer and ambient_temperature_celsius are always None
     in the current pipeline but kept for forward compatibility.
+    Aliases mirror the backend transport spellings (camelCase); snake_case
+    and camelCase are both accepted.
     """
-    model_config = ConfigDict(extra="forbid")
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     timestamp: datetime
-    heart_rate_bpm: Optional[float] = None
-    ibi_ms: list[float] = Field(default_factory=list)
-    accelerometer: Optional[dict] = None  # Always None currently
-    skin_temperature_celsius: Optional[float] = None
-    ambient_temperature_celsius: Optional[float] = None  # Always None currently
+    heart_rate_bpm: Optional[float] = Field(default=None, alias="heartRateBpm")
+    ibi_ms: list[float] = Field(default_factory=list, alias="ibiMs")
+    accelerometer: Optional[dict] = Field(default=None, alias="accelerometer")  # Always None currently
+    skin_temperature_celsius: Optional[float] = Field(default=None, alias="skinTemperatureCelsius")
+    ambient_temperature_celsius: Optional[float] = Field(default=None, alias="ambientTemperatureCelsius")  # Always None currently
     quality: TelemetrySampleQuality
 
     @field_validator("ibi_ms", mode="before")
@@ -65,8 +74,10 @@ class TelemetrySample(BaseModel):
     @field_validator("heart_rate_bpm", mode="before")
     @classmethod
     def _hr_positive(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and v <= 0:
-            return None
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return None if v <= 0 else v
         return v
 
 

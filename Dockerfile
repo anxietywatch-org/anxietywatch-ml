@@ -36,6 +36,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
-# Bind 0.0.0.0 so Azure Container Apps ingress reaches the service, honoring
-# the PORT convention used by the Container Apps platform.
+# Bind 0.0.0.0 so the container-app ingress reaches the service, honoring the
+# PORT environment variable (defaults to 8000 for the current deployment).
 CMD ["sh", "-c", "exec uvicorn anxietywatch_ml.serving.app:app --host 0.0.0.0 --port \"${PORT:-8000}\" --workers 1"]
